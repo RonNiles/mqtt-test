@@ -28,7 +28,7 @@ def on_message(client, userdata, msg):
             POWER_STATE = "OFF"
         client.publish(TOPIC_STATE, POWER_STATE)
 
-client = mqtt.Client(CLIENT_ID)
+client = mqtt.Client(CLIENT_ID, protocol=mqtt.MQTTv311)
 client.on_connect = on_connect
 client.on_message = on_message
 
