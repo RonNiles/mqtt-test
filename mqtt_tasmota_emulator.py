@@ -12,7 +12,7 @@ CLIENT_ID = "tasmota_emulator"
 POWER_STATE = "OFF"
 
 # Callback when the client receives a CONNACK response from the server
-def on_connect(client, userdata, flags, rc):
+def on_connect(client, userdata, flags, rc, properties=None):
     print("Connected with result code " + str(rc))
     client.subscribe(TOPIC_COMMAND)
     client.publish(TOPIC_STATUS, "Online", retain=True)
