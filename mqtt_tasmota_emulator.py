@@ -1,5 +1,6 @@
 import paho.mqtt.client as mqtt
 import time
+import threading
 
 # Configuration
 BROKER = "localhost"  # Change to your MQTT broker address
@@ -17,7 +18,8 @@ def on_connect(client, userdata, flags, rc, properties=None):
     client.subscribe(TOPIC_COMMAND)
     client.publish(TOPIC_STATUS, "Online", retain=True)
 
-# Callback when a PUBLISH message is received from the server
+# Event to wake up the main loop
+wake_up_event = threading.Event()
 def on_message(client, userdata, msg):
     global POWER_STATE
     print(f"Received message: {msg.topic} {msg.payload.decode()}")
@@ -26,7 +28,7 @@ def on_message(client, userdata, msg):
             POWER_STATE = "ON"
         elif msg.payload.decode().upper() == "OFF":
             POWER_STATE = "OFF"
-        client.publish(TOPIC_STATE, POWER_STATE)
+        wake_up_event.set()
 
 client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=CLIENT_ID)
 client.on_connect = on_connect
@@ -40,7 +42,8 @@ client.loop_start()
 try:
     while True:
         client.publish(TOPIC_STATE, POWER_STATE)
-        time.sleep(30)
+        wake_up_event.wait(timeout=30)
+        wake_up_event.clear()
 except KeyboardInterrupt:
     client.publish(TOPIC_STATUS, "Offline", retain=True)
     client.disconnect()
