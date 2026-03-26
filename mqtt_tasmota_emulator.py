@@ -107,7 +107,6 @@ def on_message(client, userdata, msg):
             POWER_STATE = "OFF"
         # Notify the REST API of the state change
         requests.post('http://localhost:8082/v1/set-state', json={"power": POWER_STATE})
-    global POWER_STATE, TELE_PERIOD
     print(f"Received message: {msg.topic} {msg.payload.decode()}")
     if msg.topic == TOPIC_COMMAND:
         payload = msg.payload.decode().strip()
@@ -121,6 +120,7 @@ def on_message(client, userdata, msg):
         client.publish(TOPIC_RESULT, json.dumps({"POWER": POWER_STATE}))
         # Publish plain ON/OFF to stat/tasmota_XXXXXX/POWER (no JSON, no quotes)
         client.publish("stat/tasmota_XXXXXX/POWER", POWER_STATE)
+    global POWER_STATE, TELE_PERIOD
     elif msg.topic == "cmnd/tasmota_XXXXXX/TelePeriod":
         payload = msg.payload.decode().strip()
         if payload:  # Command with a number payload

@@ -1,5 +1,17 @@
 from flask import Flask, request, jsonify
 import threading
+import http.server
+import socketserver
+import argparse
+import paho.mqtt.client as mqtt
+
+PORT = 8082
+MQTT_BROKER = "localhost"
+MQTT_PORT = 1883
+MQTT_TOPIC = "cmnd/tasmota_XXXXXX/POWER"
+
+mqtt_client = mqtt.Client()
+mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
 
 app = Flask(__name__)
 
