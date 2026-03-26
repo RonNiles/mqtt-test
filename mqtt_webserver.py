@@ -1,8 +1,15 @@
 import http.server
 import socketserver
 import argparse
+import paho.mqtt.client as mqtt
 
 PORT = 8082
+MQTT_BROKER = "localhost"
+MQTT_PORT = 1883
+MQTT_TOPIC = "cmnd/tasmota_XXXXXX/POWER"
+
+mqtt_client = mqtt.Client()
+mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
 
 class SimpleHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
@@ -25,8 +32,11 @@ class SimpleHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                         <span class="slider"></span>
                     </label>
                     <script>
-                        document.getElementById('slider').addEventListener('change', function() {
-                            alert('Slider is ' + (this.checked ? 'On' : 'Off'));
+                        const slider = document.getElementById('slider');
+                        slider.addEventListener('change', function() {
+                            const state = this.checked ? 'ON' : 'OFF';
+                            mqtt_client.publish(MQTT_TOPIC, state);
+                            alert('Slider is ' + state);
                         });
                     </script>
                     <style>
