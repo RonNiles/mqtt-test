@@ -4,6 +4,7 @@ import http.server
 import socketserver
 import argparse
 import paho.mqtt.client as mqtt
+import requests
 
 PORT = 8082
 MQTT_BROKER = "localhost"
