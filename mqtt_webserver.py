@@ -1,15 +1,30 @@
-import http.server
-import socketserver
-import argparse
-import paho.mqtt.client as mqtt
+from flask import Flask, request, jsonify
+import threading
 
-PORT = 8082
-MQTT_BROKER = "localhost"
-MQTT_PORT = 1883
-MQTT_TOPIC = "cmnd/tasmota_XXXXXX/POWER"
+app = Flask(__name__)
 
-mqtt_client = mqtt.Client()
-mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+state_lock = threading.Lock()
+device_state = {"power": "OFF"}
+
+@app.route('/v1/set-state', methods=['POST'])
+def set_state():
+    global device_state
+    data = request.json
+    with state_lock:
+        device_state['power'] = data.get('power', 'OFF')
+    mqtt_client.publish(MQTT_TOPIC, device_state['power'])
+    return jsonify(device_state)
+
+@app.route('/v1/get-state', methods=['GET'])
+def get_state():
+    with state_lock:
+        return jsonify(device_state)
+
+@app.route('/v1/wait-state-change', methods=['GET'])
+def wait_state_change():
+    # This is a placeholder for a more complex implementation
+    # that would block until the state changes.
+    return jsonify(device_state)
 
 class SimpleHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
@@ -35,8 +50,17 @@ class SimpleHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                         const slider = document.getElementById('slider');
                         slider.addEventListener('change', function() {
                             const state = this.checked ? 'ON' : 'OFF';
-                            mqtt_client.publish(MQTT_TOPIC, state);
-                            alert('Slider is ' + state);
+                            fetch('/v1/set-state', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify({ power: state })
+                            })
+                            .then(response => response.json())
+                            .then(data => {
+                                alert('Slider is ' + data.power);
+                            });
                         });
                     </script>
                     <style>
@@ -96,6 +120,7 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=PORT, help='Port to run the web server on')
     args = parser.parse_args()
 
-    with socketserver.TCPServer(("", args.port), SimpleHTTPRequestHandler) as httpd:
-        print(f"Serving on port {args.port}")
+    threading.Thread(target=lambda: app.run(port=args.port)).start()
+    with socketserver.TCPServer(("", args.port + 1), SimpleHTTPRequestHandler) as httpd:
+        print(f"Serving on port {args.port + 1}")
         httpd.serve_forever()

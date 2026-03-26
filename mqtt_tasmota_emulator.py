@@ -94,7 +94,19 @@ def get_state_payload():
     }
     return json.dumps(state)
 
+import requests
+
 def on_message(client, userdata, msg):
+    global POWER_STATE, TELE_PERIOD
+    print(f"Received message: {msg.topic} {msg.payload.decode()}")
+    if msg.topic == TOPIC_COMMAND:
+        payload = msg.payload.decode().strip()
+        if payload.upper() == "ON" or payload == "1":
+            POWER_STATE = "ON"
+        elif payload.upper() == "OFF" or payload == "0":
+            POWER_STATE = "OFF"
+        # Notify the REST API of the state change
+        requests.post('http://localhost:8082/v1/set-state', json={"power": POWER_STATE})
     global POWER_STATE, TELE_PERIOD
     print(f"Received message: {msg.topic} {msg.payload.decode()}")
     if msg.topic == TOPIC_COMMAND:
