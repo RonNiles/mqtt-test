@@ -39,7 +39,18 @@ def wait_state_change():
     return jsonify(device_state)
 
 class SimpleHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
-    def do_GET(self):
+    def do_POST(self):
+        if self.path == '/v1/set-state':
+            content_length = int(self.headers['Content-Length'])
+            post_data = self.rfile.read(content_length)
+            response = requests.post(f'http://localhost:{PORT}/v1/set-state', data=post_data, headers={'Content-Type': 'application/json'})
+            self.send_response(response.status_code)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(response.content)
+        else:
+            self.send_error(404)
+            self.end_headers()
         if self.path == '/':
             self.send_response(200)
             self.send_header('Content-type', 'text/html')
