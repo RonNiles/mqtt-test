@@ -66,71 +66,151 @@ class SimpleHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                 </head>
                 <body>
                     <h1>On-Off Slider</h1>
-                    <label class="switch">
-                        <input type="checkbox" id="slider">
-                        <span class="slider"></span>
-                    </label>
+<label class="switch" for="pref">
+  <input type="checkbox" id="pref" name="pref" />
+  <div class="toggle">
+    <div class="spinner"></div>
+  </div>
+</label>
                     <script>
-                        const slider = document.getElementById('slider');
-                        slider.addEventListener('change', function() {
-                            const state = this.checked ? 'ON' : 'OFF';
-                            fetch('/v1/set-state', {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json'
-                                },
-                                body: JSON.stringify({ power: state })
-                            })
-                            .then(response => response.json())
-                            .then(data => {
-                                alert('Slider is ' + data.power);
-                            });
-                        });
+const toggleSwitches = [...document.querySelectorAll('.switch')];
+
+toggleSwitches.forEach((toggleSwitch) => {
+  toggleSwitch.addEventListener('click', (e) => {
+    e.preventDefault();
+    const checkbox = e.currentTarget.querySelector('input[type="checkbox"]');
+    toggleSwitch.classList.add('loading');
+    setTimeout(() => {
+      toggleSwitch.classList.remove('loading');
+      checkbox.checked = !checkbox.checked;
+    }, 1000);
+  });
+});
                     </script>
                     <style>
-                        .switch {
-                            position: relative;
-                            display: inline-block;
-                            width: 60px;
-                            height: 34px;
-                        }
-                        .switch input {
-                            opacity: 0;
-                            width: 0;
-                            height: 0;
-                        }
-                        .slider {
-                            position: absolute;
-                            cursor: pointer;
-                            top: 0;
-                            left: 0;
-                            right: 0;
-                            bottom: 0;
-                            background-color: #ccc;
-                            transition: .4s;
-                        }
-                        .slider:before {
-                            position: absolute;
-                            content: "";
-                            height: 26px;
-                            width: 26px;
-                            left: 4px;
-                            bottom: 4px;
-                            background-color: white;
-                            transition: .4s;
-                        }
-                        input:checked + .slider {
-                            background-color: #2196F3;
-                        }
-                        input:checked + .slider:before {
-                            transform: translateX(26px);
-                        }
-                        .slider.round {
-                            border-radius: 34px;
-                        }
-                        .slider.round:before {
-                            border-radius: 50%;
-                        }
+:root {
+  --blue: #007aff;
+  --green: #4bd964;
+  --disabled: #9ba2b5;
+}
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  min-height: 100vh;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  flex-direction: row;
+  justify-content: center;
+  align-items: center;
+}
+
+.switch {
+  position: relative;
+  display: flex;
+  align-items: center;
+  // outline: 1px solid #e4e6ea;
+  width: 4.5rem;
+  height: 2rem;
+  border-radius: 1.5rem;
+  background-color: #f4f5f8;
+  box-shadow: inset 0px 0px 8px rgba(180, 185, 195, 0.4);
+  cursor: pointer;
+  
+  input[type="checkbox"] {
+    position: absolute;
+    opacity: 0;
+    top: -20px;
+    pointer-events: none;
+  }
+  
+  &.loading {
+    opacity: 0.5;
+    pointer-events: none;
+  }
+}
+
+.toggle {
+  position: absolute;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 3rem;
+  height: 2rem;
+  border-radius: 1.5rem;
+  transition: width 250ms ease-out, left 250ms ease-out;
+}
+.switch input[type="checkbox"]:focus ~ .toggle {
+  outline-offset: 0.125rem;
+}
+.switch.loading input[type="checkbox"]:not(:checked) ~ .toggle {
+  width: 2rem;
+  background: var(--disabled);
+}
+.switch.loading input[type="checkbox"]:checked:focus ~ .toggle,
+.switch.loading input[type="checkbox"]:not(:checked):focus ~ .toggle {
+  outline: 0.25rem solid var(--disabled);
+}
+.switch.loading input[type="checkbox"]:checked ~ .toggle {
+  width: 2rem;
+  left: calc(100% - 2rem);
+  background: var(--disabled);
+}
+.switch input[type="checkbox"]:not(:checked) ~ .toggle {
+  left: 0;
+  background: var(--blue);
+}
+.switch input[type="checkbox"]:not(:checked):focus ~ .toggle {
+  outline: 0.25rem solid var(--blue);
+}
+.switch input[type="checkbox"]:checked ~ .toggle {
+  left: calc(100% - 3rem);
+  background: var(--green);
+}
+.switch input[type="checkbox"]:checked:focus ~ .toggle {
+  outline: 0.25rem solid var(--green);
+}
+
+.spinner {
+  opacity: 0;
+  width: 1.25rem;
+  height: 1.25rem;
+  border: 0.25rem solid #FFF;
+  border-bottom-color: transparent;
+  border-radius: 50%;
+  display: inline-block;
+  box-sizing: border-box;
+  animation: rotate 1s linear infinite;
+}
+
+.switch.loading .spinner {
+  opacity: 1;
+}
+
+@keyframes rotate {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+} 
+
+@keyframes turnOn {
+  0% { left: 0; width: 3rem; background: var(--blue); }
+  50% { left: -0.5rem; width: 2rem; background: var(--blue); }
+  100% { left: calc(100% - 3rem); width: 3rem; background: var(--green); }
+}
+
+@keyframes turnOff {
+  0% { left: calc(100% - 3rem); width: 3rem; background: var(--green); }
+  50% { left: calc(100% - 1.5rem); width: 2rem; background: var(--green); }
+  100% { left: 0; width: 3rem; background: var(--blue); }
+}
                     </style>
                 </body>
                 </html>
