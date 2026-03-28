@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 BROKER = "localhost"  # Change to your MQTT broker address
 PORT = 1883
 KEEPALIVE = 60
-TOPIC_STATUS = "tele/tasmota_XXXXXX/LWT"
+TOPIC_WILL = "tele/tasmota_XXXXXX/LWT"
 TOPIC_COMMAND = "cmnd/tasmota_XXXXXX/POWER"
 TOPIC_STATE = "tele/tasmota_XXXXXX/STATE"
 TOPIC_RESULT = "stat/tasmota_XXXXXX/RESULT"
@@ -60,7 +60,7 @@ def on_connect(client, userdata, flags, rc, properties=None):
     print("Connected with result code " + str(rc))
     client.subscribe(TOPIC_COMMAND)
     client.subscribe("cmnd/tasmota_XXXXXX/TelePeriod")
-    client.publish(TOPIC_STATUS, "Online", retain=True)
+    client.publish(TOPIC_WILL, "Online", retain=True)
 
 # Event to wake up the main loop
 wake_up_event = threading.Event()
@@ -130,6 +130,7 @@ def on_message(client, userdata, msg):
             client.publish(TOPIC_RESULT, json.dumps(result))
 
 client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=CLIENT_ID)
+client.will_set(TOPIC_WILL, "Offline", qos=2, retain=True)
 client.on_connect = on_connect
 client.on_message = on_message
 
@@ -144,5 +145,4 @@ try:
         wake_up_event.wait(timeout=TELE_PERIOD)
         wake_up_event.clear()
 except KeyboardInterrupt:
-    client.publish(TOPIC_STATUS, "Offline", retain=True)
     client.disconnect()
