@@ -44,14 +44,6 @@ class PowerRequestHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(self.__class__._webpage_cache)
             return
 
-        if parsed.path == "/api/wait":
-            params = parse_qs(parsed.query)
-            from_state = params.get("from_state", ["disconnected"])[0]
-            timeout = self.parse_int(params.get("timeout", ["25"])[0], default=25)
-            timeout = max(1, min(timeout, 30))
-            self.write_json(self.wait_for_change(from_state, timeout))
-            return
-
         if parsed.path == "/api/events":
             self.stream_events()
             return
