@@ -8,6 +8,7 @@ import os
 import time
 from urllib.parse import parse_qs, urlparse
 from typing import Any
+from power_state import PowerStateEmulator, PowerStateBase
 
 PORT = 8082
 WEBPAGE_FILE = os.path.join(os.path.dirname(__file__), "webserver.html")
@@ -16,8 +17,7 @@ class PowerRequestHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     _webpage_cache = None
     _webpage_mtime = None
-    _state = "loading"
-    _condition: threading.Condition = threading.Condition()
+    _power_state: PowerStateBase | None = None
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -58,13 +58,13 @@ class PowerRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def wait_for_change(self, from_state: str, timeout: int) -> dict[str, Any]:
         remote_port = self.client_address[1]
-        with self.__class__._condition:
-            if self.__class__._state != from_state:
-                print(f"[{remote_port}] State changed from {from_state} to {self.__class__._state}")
-                return {"state": self.__class__._state, "changed": True}
-            notified = self.__class__._condition.wait(timeout=timeout)
-            print(f"[{remote_port}] Waited for change from {from_state}, current state is {self.__class__._state}, notified: {notified}")
-            return {"state": self.__class__._state, "changed": notified}
+        state = self.__class__._power_state.wait_for_change(from_state, timeout)
+        changed = state != from_state
+        if changed:
+            print(f"[{remote_port}] State changed from {from_state} to {state}")
+        else:
+            print(f"[{remote_port}] Waited for change from {from_state}, current state is {state}, changed: {changed}")
+        return {"state": state, "changed": changed}
 
     def stream_events(self) -> None:
         remote_port = self.client_address[1]
@@ -78,10 +78,7 @@ class PowerRequestHandler(http.server.BaseHTTPRequestHandler):
         last_state = None
         try:
             while True:
-                with self.__class__._condition:
-                    if self.__class__._state == last_state:
-                        self.__class__._condition.wait(timeout=25)
-                    state = self.__class__._state
+                state = self.__class__._power_state.wait_for_change(last_state if last_state else "__initial__", timeout=25)
 
                 payload = json.dumps({"state": state})
                 self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
@@ -115,12 +112,11 @@ class PowerRequestHandler(http.server.BaseHTTPRequestHandler):
             self.write_json({"error": "value must be on, off, disconnected, or loading"}, status=HTTPStatus.BAD_REQUEST)
             return
 
-        time.sleep(0.5)  # Simulate processing delay
         print(f"Setting state to {value}")
-        with self.__class__._condition:
-            self.__class__._state = value
-            self.__class__._condition.notify_all()
-        self.write_json({"state": self.__class__._state})
+        self.__class__._power_state.request_state_change(value)
+        # Wait briefly for state transition to complete
+        time.sleep(0.1)
+        self.write_json({"state": value})
 
     def write_json(self, data: dict[str, Any], status: int = HTTPStatus.OK) -> None:
         response = json.dumps(data).encode("utf-8")
@@ -144,6 +140,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Minimalist Web Server')
     parser.add_argument('--port', type=int, default=PORT, help='Port to run the web server on')
     args = parser.parse_args()
+
+    # Create PowerStateEmulator and inject it into the handler
+    power_state = PowerStateEmulator()
+    PowerRequestHandler._power_state = power_state
 
     server = PowerServer(("127.0.0.1", args.port), PowerRequestHandler)
     print(f"Serving on port {args.port}")
