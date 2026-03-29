@@ -65,8 +65,7 @@ class SimpleHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                     <title>On-Off Slider</title>
                 </head>
                 <body>
-                    <h1>On-Off Slider</h1>
-<label class="switch" for="pref">
+<label class="switch" for="pref" data-state="off">
   <input type="checkbox" id="pref" name="pref" />
   <div class="toggle">
     <div class="spinner"></div>
@@ -74,15 +73,34 @@ class SimpleHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
 </label>
                     <script>
 const toggleSwitches = [...document.querySelectorAll('.switch')];
+const stateOrder = ['off', 'on', 'disconnected'];
+
+function applyState(toggleSwitch, state) {
+  const checkbox = toggleSwitch.querySelector('input[type="checkbox"]');
+  toggleSwitch.dataset.state = state;
+  checkbox.checked = state === 'on';
+  checkbox.indeterminate = state === 'disconnected';
+}
 
 toggleSwitches.forEach((toggleSwitch) => {
+  const checkbox = toggleSwitch.querySelector('input[type="checkbox"]');
+  const initialState = checkbox.checked ? 'on' : (toggleSwitch.dataset.state || 'off');
+  applyState(toggleSwitch, initialState);
+
   toggleSwitch.addEventListener('click', (e) => {
     e.preventDefault();
-    const checkbox = e.currentTarget.querySelector('input[type="checkbox"]');
+    if (toggleSwitch.classList.contains('loading')) {
+      return;
+    }
+
+    const currentState = toggleSwitch.dataset.state || 'off';
+    const currentIndex = stateOrder.indexOf(currentState);
+    const nextState = stateOrder[(currentIndex + 1) % stateOrder.length];
+
     toggleSwitch.classList.add('loading');
     setTimeout(() => {
       toggleSwitch.classList.remove('loading');
-      checkbox.checked = !checkbox.checked;
+      applyState(toggleSwitch, nextState);
     }, 1000);
   });
 });
@@ -114,7 +132,7 @@ body {
   display: flex;
   align-items: center;
   // outline: 1px solid #e4e6ea;
-  width: 4.5rem;
+  width: 4rem;
   height: 2rem;
   border-radius: 1.5rem;
   background-color: #f4f5f8;
@@ -139,9 +157,9 @@ body {
   display: flex;
   justify-content: center;
   align-items: center;
-  width: 3rem;
+  width: 2rem;
   height: 2rem;
-  border-radius: 1.5rem;
+  border-radius: 50%;
   transition: width 250ms ease-out, left 250ms ease-out;
 }
 .switch input[type="checkbox"]:focus ~ .toggle {
@@ -160,19 +178,38 @@ body {
   left: calc(100% - 2rem);
   background: var(--disabled);
 }
-.switch input[type="checkbox"]:not(:checked) ~ .toggle {
+
+.switch[data-state="off"] .toggle {
   left: 0;
   background: var(--blue);
 }
-.switch input[type="checkbox"]:not(:checked):focus ~ .toggle {
-  outline: 0.25rem solid var(--blue);
-}
-.switch input[type="checkbox"]:checked ~ .toggle {
-  left: calc(100% - 3rem);
+
+.switch[data-state="on"] .toggle {
+  left: calc(100% - 2rem);
   background: var(--green);
 }
-.switch input[type="checkbox"]:checked:focus ~ .toggle {
+
+.switch[data-state="disconnected"] .toggle {
+  left: calc(50% - 1rem);
+  background: var(--disabled);
+}
+
+.switch[data-state="off"]:focus-within .toggle {
+  outline: 0.25rem solid var(--blue);
+}
+
+.switch[data-state="on"]:focus-within .toggle {
   outline: 0.25rem solid var(--green);
+}
+
+.switch[data-state="disconnected"]:focus-within .toggle {
+  outline: 0.25rem solid var(--disabled);
+}
+
+.switch.loading[data-state="disconnected"] .toggle {
+  width: 2rem;
+  left: calc(50% - 1rem);
+  background: var(--disabled);
 }
 
 .spinner {
