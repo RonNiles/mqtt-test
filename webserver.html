@@ -13,6 +13,13 @@
     </div>
   </label>
 
+  <div class="test-controls" aria-label="test controls">
+    <button type="button" id="btn-load">Load</button>
+    <button type="button" id="btn-on">On</button>
+    <button type="button" id="btn-off">Off</button>
+    <button type="button" id="btn-disconnected">Disconnected</button>
+  </div>
+
   <script>
     const toggleSwitches = [...document.querySelectorAll('.switch')];
     const stateOrder = ['off', 'on', 'disconnected'];
@@ -46,6 +53,33 @@
         }, 1000);
       });
     });
+
+    const primarySwitch = document.querySelector('.switch');
+    const loadButton = document.getElementById('btn-load');
+    const onButton = document.getElementById('btn-on');
+    const offButton = document.getElementById('btn-off');
+    const disconnectedButton = document.getElementById('btn-disconnected');
+
+    loadButton.addEventListener('click', () => {
+      if (!primarySwitch.classList.contains('loading')) {
+        primarySwitch.classList.add('loading');
+      }
+    });
+
+    onButton.addEventListener('click', () => {
+      primarySwitch.classList.remove('loading');
+      applyState(primarySwitch, 'on');
+    });
+
+    offButton.addEventListener('click', () => {
+      primarySwitch.classList.remove('loading');
+      applyState(primarySwitch, 'off');
+    });
+
+    disconnectedButton.addEventListener('click', () => {
+      primarySwitch.classList.remove('loading');
+      applyState(primarySwitch, 'disconnected');
+    });
   </script>
 
   <style>
@@ -66,9 +100,30 @@
     body {
       margin: 0;
       display: flex;
-      flex-direction: row;
+      flex-direction: column;
+      gap: 1rem;
       justify-content: center;
       align-items: center;
+    }
+
+    .test-controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      justify-content: center;
+    }
+
+    .test-controls button {
+      border: 1px solid #c7cbd4;
+      border-radius: 0.375rem;
+      background: #ffffff;
+      padding: 0.4rem 0.75rem;
+      font: inherit;
+      cursor: pointer;
+    }
+
+    .test-controls button:hover {
+      background: #f5f7fa;
     }
 
     .switch {
@@ -173,6 +228,15 @@
 
     .switch.loading .spinner {
       opacity: 1;
+    }
+
+    @keyframes rotate {
+      0% {
+        transform: rotate(0deg);
+      }
+      100% {
+        transform: rotate(360deg);
+      }
     }
   </style>
 </body>
