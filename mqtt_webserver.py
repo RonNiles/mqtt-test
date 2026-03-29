@@ -12,9 +12,10 @@ PORT = 8082
 WEBPAGE_FILE = os.path.join(os.path.dirname(__file__), "webserver.html")
 
 class PowerRequestHandler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
     _webpage_cache = None
     _webpage_mtime = None
-    _state = "Loading"
+    _state = "loading"
     _condition: threading.Condition = threading.Condition()
 
     def do_GET(self):
@@ -37,16 +38,21 @@ class PowerRequestHandler(http.server.BaseHTTPRequestHandler):
 
             self.send_response(HTTPStatus.OK)
             self.send_header('Content-type', 'text/html')
+            self.send_header('Content-Length', str(len(self.__class__._webpage_cache)))
             self.end_headers()
             self.wfile.write(self.__class__._webpage_cache)
             return
 
         if parsed.path == "/api/wait":
             params = parse_qs(parsed.query)
-            from_state = params.get("from_state", ["DISCONNECTED"])[0]
+            from_state = params.get("from_state", ["disconnected"])[0]
             timeout = self.parse_int(params.get("timeout", ["25"])[0], default=25)
             timeout = max(1, min(timeout, 30))
             self.write_json(self.wait_for_change(from_state, timeout))
+            return
+
+        if parsed.path == "/api/events":
+            self.stream_events()
             return
 
         self.send_error(HTTPStatus.NOT_FOUND, "Not found")
@@ -58,11 +64,39 @@ class PowerRequestHandler(http.server.BaseHTTPRequestHandler):
             return default
 
     def wait_for_change(self, from_state: str, timeout: int) -> dict[str, Any]:
+        remote_port = self.client_address[1]
         with self.__class__._condition:
             if self.__class__._state != from_state:
+                print(f"[{remote_port}] State changed from {from_state} to {self.__class__._state}")
                 return {"state": self.__class__._state, "changed": True}
             notified = self.__class__._condition.wait(timeout=timeout)
+            print(f"[{remote_port}] Waited for change from {from_state}, current state is {self.__class__._state}, notified: {notified}")
             return {"state": self.__class__._state, "changed": notified}
+
+    def stream_events(self) -> None:
+        remote_port = self.client_address[1]
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+
+        print(f"[{remote_port}] Opened event stream")
+        last_state = None
+        try:
+            while True:
+                with self.__class__._condition:
+                    if self.__class__._state == last_state:
+                        self.__class__._condition.wait(timeout=25)
+                    state = self.__class__._state
+
+                payload = json.dumps({"state": state})
+                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                self.wfile.flush()
+                last_state = state
+                print(f"[{remote_port}] Sent event: {payload}")
+        except (BrokenPipeError, ConnectionResetError):
+            print(f"[{remote_port}] Closed event stream")
 
     def do_POST(self) -> None:
         """Handle POST requests for power-state updates."""
@@ -83,9 +117,9 @@ class PowerRequestHandler(http.server.BaseHTTPRequestHandler):
             self.write_json({"error": "Invalid JSON body"}, status=HTTPStatus.BAD_REQUEST)
             return
 
-        value = data.get("value", "").strip().upper()
-        if value not in {"ON", "OFF", "DISCONNECTED", "LOADING"}:
-            self.write_json({"error": "value must be ON, OFF, DISCONNECTED, or LOADING"}, status=HTTPStatus.BAD_REQUEST)
+        value = data.get("value", "").strip().lower()
+        if value not in {"on", "off", "disconnected", "loading"}:
+            self.write_json({"error": "value must be on, off, disconnected, or loading"}, status=HTTPStatus.BAD_REQUEST)
             return
 
         print(f"Setting state to {value}")
@@ -106,7 +140,7 @@ class PowerServer(http.server.ThreadingHTTPServer):
     def __init__(
         self,
         server_address: tuple[str, int],
-        power_state: str = "Loading",
+        power_state: str = "loading",
     ) -> None:
         super().__init__(server_address, PowerRequestHandler)
         self.power_state = power_state

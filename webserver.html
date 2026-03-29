@@ -22,7 +22,17 @@
 
   <script>
     const toggleSwitches = [...document.querySelectorAll('.switch')];
-    const stateOrder = ['off', 'on', 'disconnected'];
+    const primarySwitch = document.querySelector('.switch');
+
+    function applyRemoteState(state) {
+      if (state === 'loading') {
+        primarySwitch.classList.add('loading');
+        return;
+      }
+
+      primarySwitch.classList.remove('loading');
+      applyState(primarySwitch, state.toLowerCase());
+    }
  
     function applyState(toggleSwitch, state) {
       const checkbox = toggleSwitch.querySelector('input[type="checkbox"]');
@@ -57,7 +67,7 @@
 
     async function sendPower(value) {
       try {
-        const data = await getJson('/api/power', {
+        await getJson('/api/power', {
           method: 'POST',
           body: JSON.stringify({ value })
         });
@@ -67,25 +77,22 @@
     }
 
     toggleSwitches.forEach((toggleSwitch) => {
-      const checkbox = toggleSwitch.querySelector('input[type="checkbox"]');
-      const initialState = checkbox.checked ? 'on' : (toggleSwitch.dataset.state || 'off');
-      applyState(toggleSwitch, initialState);
-
       toggleSwitch.addEventListener('click', (e) => {
         e.preventDefault();
         if (toggleSwitch.classList.contains('loading')) {
           return;
         }
-
-        const currentState = toggleSwitch.dataset.state || 'off';
-        const currentIndex = stateOrder.indexOf(currentState);
-        const nextState = stateOrder[(currentIndex + 1) % stateOrder.length];
-
-        sendPower(nextState.toUpperCase());
+        const currentState = toggleSwitch.dataset.state || 'disconnected';
+        if (currentState === 'on') {
+        } else if (currentState === 'off') {
+          toggleSwitch.classList.add('loading');
+          sendPower("ON");
+        } else {
+          toggleSwitch.classList.add('loading');
+          sendPower("OFF");
+        }
       });
     });
-
-    const primarySwitch = document.querySelector('.switch');
     const loadButton = document.getElementById('btn-load');
     const onButton = document.getElementById('btn-on');
     const offButton = document.getElementById('btn-off');
@@ -107,27 +114,27 @@
       sendPower("DISCONNECTED");
     });
 
-    async function waitLoop() {
+    function waitLoop() {
       applyState(primarySwitch, 'disconnected');
       primarySwitch.classList.add('loading');
-      state = "LOADING";
-      while (true) {
+      const eventSource = new EventSource('/api/events');
+
+      eventSource.onmessage = (event) => {
         try {
-            const new_state = await getJson(`/api/wait?from_state=${encodeURIComponent(state)}&timeout=25`);
-            if (new_state.state !== state) {
-              if (new_state.state === "LOADING") {
-                primarySwitch.classList.add('loading');
-              } else {
-                primarySwitch.classList.remove('loading');
-                applyState(primarySwitch, new_state.state.toLowerCase());
-              }
-              state = new_state.state;
-            }
+          const payload = JSON.parse(event.data);
+          if (payload.state) {
+            applyRemoteState(payload.state);
+          }
         } catch (error) {
-            console.error('Error fetching state:', error);
-            await new Promise(resolve => setTimeout(resolve, 5000));
+          console.error('Error parsing event stream payload:', error);
         }
-      }
+      };
+
+      eventSource.onerror = () => {
+        primarySwitch.classList.add('loading');
+      };
+
+      return eventSource;
     }
 
     waitLoop();
