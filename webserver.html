@@ -23,12 +23,52 @@
   <script>
     const toggleSwitches = [...document.querySelectorAll('.switch')];
     const stateOrder = ['off', 'on', 'disconnected'];
+    const powerToUiState = {
+      ON: 'on',
+      OFF: 'off',
+      DISCONNECTED: 'disconnected'
+    };
 
     function applyState(toggleSwitch, state) {
       const checkbox = toggleSwitch.querySelector('input[type="checkbox"]');
       toggleSwitch.dataset.state = state;
       checkbox.checked = state === 'on';
       checkbox.indeterminate = state === 'disconnected';
+    }
+
+    async function getJson(url, options = {}) {
+      const response = await fetch(url, {
+        ...options,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(options.headers || {})
+        }
+      });
+
+      let payload = {};
+      try {
+        payload = await response.json();
+      } catch (error) {
+        payload = {};
+      }
+
+      if (!response.ok) {
+        const message = payload.error || `${response.status} ${response.statusText}`;
+        throw new Error(message);
+      }
+
+      return payload;
+    }
+
+    async function sendPower(value) {
+      try {
+        const data = await getJson('/api/power', {
+          method: 'POST',
+          body: JSON.stringify({ value })
+        });
+      } catch (error) {
+        console.error('Error sending power state:', error);
+      }
     }
 
     toggleSwitches.forEach((toggleSwitch) => {
@@ -46,13 +86,22 @@
         const currentIndex = stateOrder.indexOf(currentState);
         const nextState = stateOrder[(currentIndex + 1) % stateOrder.length];
 
-        toggleSwitch.classList.add('loading');
-        setTimeout(() => {
-          toggleSwitch.classList.remove('loading');
-          applyState(toggleSwitch, nextState);
-        }, 1000);
+        sendPower(nextState.toUpperCase());
       });
     });
+
+    async function waitLoop() {
+      state = "DISCONNECTED";
+      while (true) {
+          try {
+              const state = await getJson(`/api/wait?from_state=${encodeURIComponent(currentVersion)}&timeout=25`);
+              applyState(state);
+          } catch (error) {
+              console.error('Error fetching state:', error);
+              await new Promise(resolve => setTimeout(resolve, 5000));
+          }
+        }
+      }
 
     const primarySwitch = document.querySelector('.switch');
     const loadButton = document.getElementById('btn-load');
@@ -67,18 +116,15 @@
     });
 
     onButton.addEventListener('click', () => {
-      primarySwitch.classList.remove('loading');
-      applyState(primarySwitch, 'on');
+      sendPower("ON");
     });
 
     offButton.addEventListener('click', () => {
-      primarySwitch.classList.remove('loading');
-      applyState(primarySwitch, 'off');
+      sendPower("OFF");
     });
 
     disconnectedButton.addEventListener('click', () => {
-      primarySwitch.classList.remove('loading');
-      applyState(primarySwitch, 'disconnected');
+      sendPower("DISCONNECTED");
     });
   </script>
 

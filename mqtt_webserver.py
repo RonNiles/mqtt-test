@@ -1,52 +1,25 @@
-from flask import Flask, request, jsonify
+from http import HTTPStatus
+import json
 import threading
 import http.server
 import socketserver
 import argparse
 import os
-import paho.mqtt.client as mqtt
-import requests
+from urllib.parse import parse_qs, urlparse
+from typing import Any
 
 PORT = 8082
-MQTT_BROKER = "localhost"
-MQTT_PORT = 1883
-MQTT_TOPIC = "cmnd/tasmota_XXXXXX/POWER"
 WEBPAGE_FILE = os.path.join(os.path.dirname(__file__), "webserver.html")
 
-mqtt_client = mqtt.Client()
-mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
-
-app = Flask(__name__)
-
-state_lock = threading.Lock()
-device_state = {"power": "OFF"}
-
-@app.route('/v1/set-state', methods=['POST'])
-def set_state():
-    global device_state
-    data = request.json
-    with state_lock:
-        device_state['power'] = data.get('power', 'OFF')
-    mqtt_client.publish(MQTT_TOPIC, device_state['power'])
-    return jsonify(device_state)
-
-@app.route('/v1/get-state', methods=['GET'])
-def get_state():
-    with state_lock:
-        return jsonify(device_state)
-
-@app.route('/v1/wait-state-change', methods=['GET'])
-def wait_state_change():
-    # This is a placeholder for a more complex implementation
-    # that would block until the state changes.
-    return jsonify(device_state)
-
-class SimpleHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
+class SimpleHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
     _webpage_cache = None
     _webpage_mtime = None
+    _state = "Loading"
+    _condition: threading.Condition = threading.Condition()
 
     def do_GET(self):
-        if self.path == '/':
+        parsed = urlparse(self.path)
+        if parsed.path == '/':
             try:
                 stat_result = os.stat(WEBPAGE_FILE)
                 current_mtime = stat_result.st_mtime
@@ -59,23 +32,81 @@ class SimpleHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                         self.__class__._webpage_cache = html_file.read()
                     self.__class__._webpage_mtime = current_mtime
             except OSError as exc:
-                self.send_error(500, f"Could not load {WEBPAGE_FILE}: {exc}")
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, f"Could not load {WEBPAGE_FILE}: {exc}")
                 return
 
-            self.send_response(200)
+            self.send_response(HTTPStatus.OK)
             self.send_header('Content-type', 'text/html')
             self.end_headers()
             self.wfile.write(self.__class__._webpage_cache)
-        else:
-            self.send_error(404)
-            self.end_headers()
+            return
+
+        if parsed.path == "/api/wait":
+            params = parse_qs(parsed.query)
+            from_state = params.get("from_state", ["DISCONNECTED"])[0]
+            timeout = self.parse_int(params.get("timeout", ["25"])[0], default=25)
+            timeout = max(1, min(timeout, 30))
+            self.write_json(self.wait_for_change(from_state, timeout))
+            return
+
+        self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+
+    def parse_int(self, value: str, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def wait_for_change(self, from_state: str, timeout: int) -> dict[str, Any]:
+        with self.__class__._condition:
+            if self.__class__._state != from_state:
+                return {"state": self.__class__._state, "changed": True}
+            notified = self.__class__._condition.wait(timeout=timeout)
+            return {"state": self.__class__._state, "changed": notified}
+
+    def do_POST(self) -> None:
+        """Handle POST requests for power-state updates."""
+        parsed = urlparse(self.path)
+        if parsed.path != "/api/power":
+            self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except (TypeError, ValueError):
+            length = 0
+        body = self.rfile.read(length) if length > 0 else b"{}"
+
+        try:
+            data = json.loads(body.decode("utf-8"))
+        except json.JSONDecodeError:
+            self.write_json({"error": "Invalid JSON body"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        value = data.get("value", "").strip().upper()
+        if value not in {"ON", "OFF", "DISCONNECTED", "LOADING"}:
+            self.write_json({"error": "value must be ON, OFF, DISCONNECTED, or LOADING"}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        print(f"Setting state to {value}")
+        with self.__class__._condition:
+            self.__class__._state = value
+            self.__class__._condition.notify_all()
+        self.write_json({"state": self.__class__._state})
+
+    def write_json(self, data: dict[str, Any], status: int = HTTPStatus.OK) -> None:
+        response = json.dumps(data).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response)))
+        self.end_headers()
+        self.wfile.write(response)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Minimalist Web Server')
     parser.add_argument('--port', type=int, default=PORT, help='Port to run the web server on')
     args = parser.parse_args()
 
-    threading.Thread(target=lambda: app.run(port=args.port)).start()
     with socketserver.TCPServer(("", args.port + 1), SimpleHTTPRequestHandler) as httpd:
         print(f"Serving on port {args.port + 1}")
         httpd.serve_forever()
