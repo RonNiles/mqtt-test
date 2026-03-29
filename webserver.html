@@ -84,12 +84,11 @@
         }
         const currentState = toggleSwitch.dataset.state || 'disconnected';
         if (currentState === 'on') {
+          toggleSwitch.classList.add('loading');
+          sendPower("OFF");
         } else if (currentState === 'off') {
           toggleSwitch.classList.add('loading');
           sendPower("ON");
-        } else {
-          toggleSwitch.classList.add('loading');
-          sendPower("OFF");
         }
       });
     });

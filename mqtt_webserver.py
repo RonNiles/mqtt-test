@@ -5,6 +5,7 @@ import http.server
 import socketserver
 import argparse
 import os
+import time
 from urllib.parse import parse_qs, urlparse
 from typing import Any
 
@@ -122,6 +123,7 @@ class PowerRequestHandler(http.server.BaseHTTPRequestHandler):
             self.write_json({"error": "value must be on, off, disconnected, or loading"}, status=HTTPStatus.BAD_REQUEST)
             return
 
+        time.sleep(0.5)  # Simulate processing delay
         print(f"Setting state to {value}")
         with self.__class__._condition:
             self.__class__._state = value
