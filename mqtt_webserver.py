@@ -11,7 +11,7 @@ from typing import Any
 PORT = 8082
 WEBPAGE_FILE = os.path.join(os.path.dirname(__file__), "webserver.html")
 
-class SimpleHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
+class PowerRequestHandler(http.server.BaseHTTPRequestHandler):
     _webpage_cache = None
     _webpage_mtime = None
     _state = "Loading"
@@ -102,11 +102,29 @@ class SimpleHTTPRequestHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(response)
 
+class PowerServer(http.server.ThreadingHTTPServer):
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        power_state: str = "Loading",
+    ) -> None:
+        super().__init__(server_address, PowerRequestHandler)
+        self.power_state = power_state
+        self.allow_reuse_address = True  
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Minimalist Web Server')
     parser.add_argument('--port', type=int, default=PORT, help='Port to run the web server on')
     args = parser.parse_args()
 
-    with socketserver.TCPServer(("", args.port + 1), SimpleHTTPRequestHandler) as httpd:
-        print(f"Serving on port {args.port + 1}")
-        httpd.serve_forever()
+    server = PowerServer(("127.0.0.1", args.port), PowerRequestHandler)
+    print(f"Serving on port {args.port}")
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    try:
+        while True:
+            threading.Event().wait(1)
+    except KeyboardInterrupt:
+        print("Shutting down server...")
+        server.shutdown()
+        server.server_close()

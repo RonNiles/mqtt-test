@@ -23,12 +23,7 @@
   <script>
     const toggleSwitches = [...document.querySelectorAll('.switch')];
     const stateOrder = ['off', 'on', 'disconnected'];
-    const powerToUiState = {
-      ON: 'on',
-      OFF: 'off',
-      DISCONNECTED: 'disconnected'
-    };
-
+ 
     function applyState(toggleSwitch, state) {
       const checkbox = toggleSwitch.querySelector('input[type="checkbox"]');
       toggleSwitch.dataset.state = state;
@@ -90,19 +85,6 @@
       });
     });
 
-    async function waitLoop() {
-      state = "DISCONNECTED";
-      while (true) {
-          try {
-              const state = await getJson(`/api/wait?from_state=${encodeURIComponent(currentVersion)}&timeout=25`);
-              applyState(state);
-          } catch (error) {
-              console.error('Error fetching state:', error);
-              await new Promise(resolve => setTimeout(resolve, 5000));
-          }
-        }
-      }
-
     const primarySwitch = document.querySelector('.switch');
     const loadButton = document.getElementById('btn-load');
     const onButton = document.getElementById('btn-on');
@@ -110,9 +92,7 @@
     const disconnectedButton = document.getElementById('btn-disconnected');
 
     loadButton.addEventListener('click', () => {
-      if (!primarySwitch.classList.contains('loading')) {
-        primarySwitch.classList.add('loading');
-      }
+      sendPower("LOADING");
     });
 
     onButton.addEventListener('click', () => {
@@ -126,6 +106,31 @@
     disconnectedButton.addEventListener('click', () => {
       sendPower("DISCONNECTED");
     });
+
+    async function waitLoop() {
+      applyState(primarySwitch, 'disconnected');
+      primarySwitch.classList.add('loading');
+      state = "LOADING";
+      while (true) {
+        try {
+            const new_state = await getJson(`/api/wait?from_state=${encodeURIComponent(state)}&timeout=25`);
+            if (new_state.state !== state) {
+              if (new_state.state === "LOADING") {
+                primarySwitch.classList.add('loading');
+              } else {
+                primarySwitch.classList.remove('loading');
+                applyState(primarySwitch, new_state.state.toLowerCase());
+              }
+              state = new_state.state;
+            }
+        } catch (error) {
+            console.error('Error fetching state:', error);
+            await new Promise(resolve => setTimeout(resolve, 5000));
+        }
+      }
+    }
+
+    waitLoop();
   </script>
 
   <style>
