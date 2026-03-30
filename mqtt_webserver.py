@@ -134,7 +134,7 @@ class PowerServer(http.server.ThreadingHTTPServer):
     ) -> None:
         super().__init__(server_address, PowerRequestHandler)
         self.power_state = power_state
-        self.allow_reuse_address = True  
+        self.allow_reuse_address = True
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Minimalist Web Server')
