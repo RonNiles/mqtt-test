@@ -109,7 +109,8 @@ class PowerStateMQTT(PowerStateBase):
     def request_state_change(self, new_state: str) -> None:
         with self._condition:
             if self._state not in {"on", "off"}:
-                return  # Ignore state change requests while loading
+                print(f"request_state_change: Ignoring state change request to '{new_state}' because current state is '{self._state}'")
+                return  # Ignore state change requests while loading or connecting
 
             self._state = "loading"
             self._condition.notify_all()  # Notify that we're now loading
@@ -118,6 +119,7 @@ class PowerStateMQTT(PowerStateBase):
                 if self._mqtt_client is not None:
                     try:
                         self._mqtt_client.publish(self._power_command_topic, new_state.upper())
+                        print(f"request_state_change: Published MQTT message to change state to '{new_state}'")
                         return # Assume state will change based on MQTT message, wait for confirmation in mqtt_manager
                     except Exception as e:
                         print("Failed to publish MQTT message:", e)
@@ -132,6 +134,7 @@ class PowerStateMQTT(PowerStateBase):
         """MQTT manager to handle connection and messages."""
         with self._condition:
             self._state = "loading"
+            print ("mqtt_manager: state set to 'loading'")
             self._condition.notify_all()  # Notify that we're now loading
 
         need_reconnect = True
@@ -156,6 +159,7 @@ class PowerStateMQTT(PowerStateBase):
         self._mqtt_client.on_disconnect = self._on_disconnect
         self._mqtt_client.on_message = self._on_message
         try:
+            print(f"Attempting to connect to MQTT broker at {self._host}:{self._port}...")
             connect_start_time = time.time()
             self._mqtt_client.connect(self._host, self._port, KEEPALIVE)
             print("MQTT client connected successfully after {:.2f} seconds".format(time.time() - connect_start_time))
@@ -217,7 +221,6 @@ class PowerStateMQTT(PowerStateBase):
             if topic.endswith("/LWT"):
                 if payload == "Online":
                     print("MQTT LWT indicates device is online")
-                    self._state = "on"
                 else:
                     print("MQTT LWT indicates device is offline")
                     self._state = "disconnected"
