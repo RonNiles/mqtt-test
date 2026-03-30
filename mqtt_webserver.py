@@ -8,7 +8,7 @@ import os
 import time
 from urllib.parse import parse_qs, urlparse
 from typing import Any
-from power_state import PowerStateEmulator, PowerStateBase
+from power_state import PowerStateEmulator, PowerStateBase, PowerStateMQTT
 
 PORT = 8082
 WEBPAGE_FILE = os.path.join(os.path.dirname(__file__), "webserver.html")
@@ -141,8 +141,8 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=PORT, help='Port to run the web server on')
     args = parser.parse_args()
 
-    # Create PowerStateEmulator and inject it into the handler
-    power_state = PowerStateEmulator()
+    # Create PowerStateMQTT and inject it into the handler
+    power_state = PowerStateMQTT()
     PowerRequestHandler._power_state = power_state
 
     server = PowerServer(("127.0.0.1", args.port), PowerRequestHandler)
