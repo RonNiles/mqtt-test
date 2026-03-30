@@ -86,7 +86,8 @@ class PowerStateMQTT(PowerStateBase):
         self._host = os.getenv("MQTT_HOST", "localhost")
         self._port = int(os.getenv("MQTT_PORT", "1883"))
         self._tasmota_id = os.getenv("TASMOTA_ID", "XXXXXX")
-        self._state = "initializing"
+        self._state = "disconnected"
+        self._disconnect_count = 0
         self._condition: threading.Condition = threading.Condition()
         self._mqtt_client: Any = None  # Placeholder for MQTT client
         self._power_state: str = "unknown"
@@ -127,6 +128,8 @@ class PowerStateMQTT(PowerStateBase):
             self._cleanup_client()  # If we can't publish, treat it as a disconnection
             with self._condition:
                 self._state = "disconnected"
+                self._disconnect_count += 1
+                print(f"request_state_change: Failed to publish MQTT message, setting state to 'disconnected'")
                 self._condition.notify_all()
 
     def mqtt_manager(self) -> None:
@@ -145,8 +148,10 @@ class PowerStateMQTT(PowerStateBase):
 
             with self._condition:
                 previous_state = self._state
+                previous_disconnect_count = self._disconnect_count
                 self._condition.wait(timeout=10)  # Wait for state change or timeout
-                if self._state == "disconnected" and previous_state == "disconnected":
+                if self._state == "disconnected" and previous_state == "disconnected" and self._disconnect_count == previous_disconnect_count:
+                    print(f"mqtt_manager: Detected prolonged disconnected state (count {self._disconnect_count}), will attempt to reconnect...")
                     self._state = "loading"
                     self._condition.notify_all()
                     need_reconnect = True
@@ -169,6 +174,8 @@ class PowerStateMQTT(PowerStateBase):
             print(f"_start_client: MQTT connection failed after {elapsed_time:.2f} seconds:", e)
             with self._condition:
                 self._state = "disconnected"
+                self._disconnect_count += 1
+                print("state set to 'disconnected' in _start_client due to connection failure")
                 self._condition.notify_all()
 
     def _cleanup_client(self) -> None:
@@ -193,15 +200,10 @@ class PowerStateMQTT(PowerStateBase):
             self._cleanup_client()
             with self._condition:
                 self._state = "disconnected"
+                self._disconnect_count += 1
+                print("state set to 'disconnected' in _on_connect due to failed connection")
                 self._condition.notify_all()
             return
-        with self._condition:
-            print("MQTT connected with result code "+str(rc))
-            if rc != 0:
-                print("Failed to connect, return code:", rc)
-                self._state = "disconnected"
-                self._condition.notify_all()
-                return
         # Subscribe to command topic
         client.subscribe(self._lwt_topic)
         client.subscribe(self._power_topic)
@@ -211,23 +213,32 @@ class PowerStateMQTT(PowerStateBase):
     def _on_disconnect(self, client, userdata, flags, rc, properties=None):
         with self._condition:
             self._state = "disconnected"
+            self._disconnect_count += 1
+            print("state set to 'disconnected' in _on_disconnect")
             self._condition.notify_all()
 
     def _on_message(self, client, userdata, msg):
         topic = msg.topic
         payload = msg.payload.decode().strip()
         print(f"Received MQTT message: {topic} {payload}")
+        cleanup_needed = False
         with self._condition:
             if topic.endswith("/LWT"):
                 if payload == "Online":
                     print("MQTT LWT indicates device is online")
                 else:
                     print("MQTT LWT indicates device is offline")
-                    self._state = "disconnected"
-                    self._cleanup_client()
-                self._condition.notify_all()
+                    cleanup_needed = True
             elif topic.endswith("/POWER"):
                 if payload in {"ON", "OFF"}:
                     print(f"MQTT POWER state changed to {payload}")
                     self._state = payload.lower()
                     self._condition.notify_all()
+                return
+
+        if cleanup_needed:
+            with self._condition:
+                if self._state != "loading":  # Only set to loading if we're not already in the middle of a state change
+                    self._state = "loading"
+                    self._condition.notify_all()
+            self._cleanup_client()  # on_disconnect will be called which will set state to disconnected and trigger reconnect logic in mqtt_manager

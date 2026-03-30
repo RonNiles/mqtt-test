@@ -143,6 +143,7 @@
     :root {
       --blue: #007aff;
       --green: #4bd964;
+      --orange: #ff9500;
       --disabled: #9ba2b5;
     }
 
@@ -240,7 +241,7 @@
 
     .switch[data-state="off"] .toggle {
       left: 0;
-      background: var(--blue);
+      background: var(--orange);
     }
 
     .switch[data-state="on"] .toggle {
@@ -254,7 +255,7 @@
     }
 
     .switch[data-state="off"]:focus-within .toggle {
-      outline: 0.25rem solid var(--blue);
+      outline: 0.25rem solid var(--orange);
     }
 
     .switch[data-state="on"]:focus-within .toggle {
