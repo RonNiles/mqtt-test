@@ -25,6 +25,10 @@ class PowerStateBase(ABC):
         """Request a change to a new state: "on", "off", or "disconnected"."""
         pass
 
+    def close(self) -> None:
+        """Release any resources owned by this state provider."""
+        return
+
 class PowerStateEmulator(PowerStateBase):
     """Emulates power state changes for testing purposes."""
     def __init__(self) -> None:
@@ -97,10 +101,11 @@ class PowerStateMQTT(PowerStateBase):
         self._lwt_topic = f"tele/tasmota_{self._tasmota_id}/LWT"
         self._power_topic = f"stat/tasmota_{self._tasmota_id}/POWER"
         self._power_command_topic = f"cmnd/tasmota_{self._tasmota_id}/POWER"
+        self._stop_event = threading.Event()
 
         """Start the MQTT manager thread after initialization."""
-        self.mqtt_thread = threading.Thread(target=self.mqtt_manager, daemon=True)
-        self.mqtt_thread.start()
+        self._mqtt_thread = threading.Thread(target=self.mqtt_manager, daemon=True)
+        self._mqtt_thread.start()
 
     def wait_for_change(self, from_state: str, timeout: int) -> str:
         with self._condition:
@@ -135,7 +140,8 @@ class PowerStateMQTT(PowerStateBase):
                 self._condition.notify_all()
 
     def mqtt_manager(self) -> None:
-        time.sleep(2)  # Brief delay to allow main thread to start
+        if self._stop_event.wait(timeout=2):
+            return
         """MQTT manager to handle connection and messages."""
         with self._condition:
             self._state = "loading"
@@ -145,7 +151,7 @@ class PowerStateMQTT(PowerStateBase):
 
         need_reconnect = True
         need_disconnect = False
-        while True:
+        while not self._stop_event.is_set():
             if need_reconnect:
                 print("mqtt_manager: Attempting to start MQTT client...")
                 self._start_client()
@@ -165,6 +171,8 @@ class PowerStateMQTT(PowerStateBase):
                 previous_disconnect_count = self._disconnect_count
                 previous_loading_count = self._loading_count
                 self._condition.wait(timeout=10)  # Wait for state change or timeout
+                if self._stop_event.is_set():
+                    break
                 if self._state == "disconnected" and previous_state == "disconnected" and self._disconnect_count == previous_disconnect_count:
                     print(f"mqtt_manager: Detected prolonged disconnected state (count {self._disconnect_count}), will attempt to reconnect...")
                     self._state = "loading"
@@ -176,6 +184,16 @@ class PowerStateMQTT(PowerStateBase):
                     print(f"mqtt_manager: Detected prolonged loading state (count {self._loading_count}), disconnecting")
                     need_disconnect = True
                     continue
+
+        self._cleanup_client()
+
+    def close(self) -> None:
+        self._stop_event.set()
+        with self._condition:
+            self._condition.notify_all()
+        self._cleanup_client()
+        if self._mqtt_thread.is_alive():
+            self._mqtt_thread.join(timeout=2)
 
     def _start_client(self) -> None:
         """Start the MQTT client and connect to the broker."""

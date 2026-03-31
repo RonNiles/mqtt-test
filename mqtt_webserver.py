@@ -18,6 +18,31 @@ class PowerRequestHandler(http.server.BaseHTTPRequestHandler):
     _webpage_cache = None
     _webpage_mtime = None
     _power_state: PowerStateBase | None = None
+    _power_state_lock = threading.Lock()
+    _active_stream_refs = 0
+
+    @classmethod
+    def acquire_power_state_for_stream(cls) -> PowerStateBase:
+        with cls._power_state_lock:
+            cls._active_stream_refs += 1
+            if cls._active_stream_refs == 1 or cls._power_state is None:
+                cls._power_state = PowerStateMQTT()
+                print("Created PowerStateMQTT for first active event stream")
+            return cls._power_state
+
+    @classmethod
+    def release_power_state_for_stream(cls) -> None:
+        state_to_close: PowerStateBase | None = None
+        with cls._power_state_lock:
+            if cls._active_stream_refs == 0:
+                return
+            cls._active_stream_refs -= 1
+            if cls._active_stream_refs == 0:
+                state_to_close = cls._power_state
+                cls._power_state = None
+                print("No active event streams remain; closing PowerStateMQTT")
+        if state_to_close is not None:
+            state_to_close.close()
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -68,6 +93,7 @@ class PowerRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def stream_events(self) -> None:
         remote_port = self.client_address[1]
+        power_state = self.__class__.acquire_power_state_for_stream()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -76,17 +102,24 @@ class PowerRequestHandler(http.server.BaseHTTPRequestHandler):
 
         print(f"[{remote_port}] Opened event stream")
         last_state = None
+        heartbeat_interval = 2
         try:
             while True:
-                state = self.__class__._power_state.wait_for_change(last_state if last_state else "__initial__", timeout=25)
-
-                payload = json.dumps({"state": state})
-                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
-                self.wfile.flush()
-                last_state = state
-                print(f"[{remote_port}] Sent event: {payload}")
+                state = power_state.wait_for_change(last_state if last_state else "__initial__", timeout=heartbeat_interval)
+                if state != last_state:
+                    payload = json.dumps({"state": state})
+                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                    last_state = state
+                    print(f"[{remote_port}] Sent event: {payload}")
+                else:
+                    # Keepalive comment forces a periodic write so broken pipes are detected quickly.
+                    self.wfile.write(b": keepalive\n\n")
+                    self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             print(f"[{remote_port}] Closed event stream")
+        finally:
+            self.__class__.release_power_state_for_stream()
 
     def do_POST(self) -> None:
         """Handle POST requests for power-state updates."""
@@ -113,6 +146,9 @@ class PowerRequestHandler(http.server.BaseHTTPRequestHandler):
             return
 
         print(f"Setting state to {value}")
+        if self.__class__._power_state is None:
+            self.write_json({"error": "No active event stream"}, status=HTTPStatus.SERVICE_UNAVAILABLE)
+            return
         self.__class__._power_state.request_state_change(value)
         # Wait briefly for state transition to complete
         time.sleep(0.1)
@@ -140,10 +176,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Minimalist Web Server')
     parser.add_argument('--port', type=int, default=PORT, help='Port to run the web server on')
     args = parser.parse_args()
-
-    # Create PowerStateMQTT and inject it into the handler
-    power_state = PowerStateMQTT()
-    PowerRequestHandler._power_state = power_state
 
     server = PowerServer(("127.0.0.1", args.port), PowerRequestHandler)
     print(f"Serving on port {args.port}")
