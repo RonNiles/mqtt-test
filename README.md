@@ -2,6 +2,11 @@
 
 This project is an MQTT emulator for Tasmota devices. It simulates a Tasmota device by connecting to an MQTT broker and responding to commands.
 
+It also includes a Go port of the web server and power-state manager:
+
+- `mqtt_webserver.go`
+- `power_state.go`
+
 ## Features
 
 - Connects to an MQTT broker
@@ -13,6 +18,7 @@ This project is an MQTT emulator for Tasmota devices. It simulates a Tasmota dev
 
 - Python 3.x
 - `paho-mqtt` library
+- Go 1.24+
 
 ## Installation
 
@@ -25,6 +31,11 @@ This project is an MQTT emulator for Tasmota devices. It simulates a Tasmota dev
 2. Install the required Python package:
    ```bash
    pip install paho-mqtt
+   ```
+
+3. Download Go dependencies:
+   ```bash
+   go mod tidy
    ```
 
 ## Usage
@@ -40,6 +51,37 @@ This project is an MQTT emulator for Tasmota devices. It simulates a Tasmota dev
    ```bash
    mosquitto_pub -t cmnd/tasmota_XXXXXX/power -m ON
    ```
+
+## Go Web Server Usage
+
+The Go server provides:
+
+- `GET /` serves `webserver.html`
+- `GET /api/events` provides server-sent events (SSE)
+- `POST /api/power` requests power state changes
+
+Set environment variables as needed:
+
+```bash
+export MQTT_HOST=localhost
+export MQTT_PORT=1883
+export TASMOTA_ID=XXXXXX
+```
+
+Build and run:
+
+```bash
+go build ./...
+go run mqtt_webserver.go power_state.go --port 8082
+```
+
+Example request:
+
+```bash
+curl -X POST http://127.0.0.1:8082/api/power \
+   -H 'Content-Type: application/json' \
+   -d '{"value":"on"}'
+```
 
 ## License
 
