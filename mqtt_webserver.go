@@ -218,6 +218,7 @@ func ioWriteString(w http.ResponseWriter, s string) (int, error) {
 }
 
 func main() {
+	host := flag.String("host", "127.0.0.1", "Host/IP address to bind the web server to")
 	port := flag.Int("port", defaultPort, "Port to run the web server on")
 	flag.Parse()
 
@@ -243,8 +244,8 @@ func main() {
 		handlePower(w, r)
 	})
 
-	addr := fmt.Sprintf("127.0.0.1:%d", *port)
-	fmt.Printf("Serving on port %d\n", *port)
+	addr := fmt.Sprintf("%s:%d", *host, *port)
+	fmt.Printf("Serving on %s\n", addr)
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		fmt.Println("Server stopped:", err)
 	}

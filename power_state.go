@@ -272,13 +272,6 @@ func (p *PowerStateMQTT) Close() {
 func (p *PowerStateMQTT) mqttManager() {
 	defer close(p.doneCh)
 
-	select {
-	case <-time.After(2 * time.Second):
-	case <-p.stopCh:
-		p.cleanupClient()
-		return
-	}
-
 	p.mu.Lock()
 	p.state = "loading"
 	p.loadingCount++
