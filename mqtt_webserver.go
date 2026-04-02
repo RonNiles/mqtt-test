@@ -36,7 +36,7 @@ func (s *serverState) acquirePowerStateForStream() PowerState {
 	s.activeStreamRefs++
 	if s.activeStreamRefs == 1 || s.powerState == nil {
 		s.powerState = NewPowerStateMQTT()
-		fmt.Println("Created PowerStateMQTT for first active event stream")
+		logln("Created PowerStateMQTT for first active event stream")
 	}
 	return s.powerState
 }
@@ -52,7 +52,7 @@ func (s *serverState) releasePowerStateForStream() {
 	if s.activeStreamRefs == 0 {
 		stateToClose = s.powerState
 		s.powerState = nil
-		fmt.Println("No active event streams remain; closing PowerStateMQTT")
+		logln("No active event streams remain; closing PowerStateMQTT")
 	}
 	s.mu.Unlock()
 
@@ -117,7 +117,7 @@ func streamEvents(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	fmt.Printf("[%s] Opened event stream\n", remotePort)
+	logf("[%s] Opened event stream\n", remotePort)
 	lastState := ""
 	heartbeatInterval := 20 * time.Second
 
@@ -145,7 +145,7 @@ func streamEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			cancelWait()
-			fmt.Printf("[%s] Closed event stream\n", remotePort)
+			logf("[%s] Closed event stream\n", remotePort)
 			return
 		case state = <-stateCh:
 			cancelWait()
@@ -154,15 +154,15 @@ func streamEvents(w http.ResponseWriter, r *http.Request) {
 		if state != lastState {
 			payload, _ := json.Marshal(map[string]string{"state": state})
 			if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
-				fmt.Printf("[%s] Closed event stream\n", remotePort)
+				logf("[%s] Closed event stream\n", remotePort)
 				return
 			}
 			flusher.Flush()
 			lastState = state
-			fmt.Printf("[%s] Sent event: %s\n", remotePort, payload)
+			logf("[%s] Sent event: %s\n", remotePort, payload)
 		} else {
 			if _, err := ioWriteString(w, ": keepalive\n\n"); err != nil {
-				fmt.Printf("[%s] Closed event stream\n", remotePort)
+				logf("[%s] Closed event stream\n", remotePort)
 				return
 			}
 			flusher.Flush()
@@ -193,7 +193,7 @@ func handlePower(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Printf("Setting state to %s\n", value)
+	logf("Setting state to %s\n", value)
 	powerState := sharedState.currentPowerState()
 	if powerState == nil {
 		writeJSON(w, map[string]string{"error": "No active event stream"}, http.StatusServiceUnavailable)
@@ -245,8 +245,8 @@ func main() {
 	})
 
 	addr := fmt.Sprintf("%s:%d", *host, *port)
-	fmt.Printf("Serving on %s\n", addr)
+	logf("Serving on %s\n", addr)
 	if err := http.ListenAndServe(addr, nil); err != nil {
-		fmt.Println("Server stopped:", err)
+		logln("Server stopped:", err)
 	}
 }

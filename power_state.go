@@ -121,7 +121,7 @@ func (p *PowerStateEmulator) connectionWatchdog() {
 		case <-ticker.C:
 			p.mu.Lock()
 			if p.state == "disconnected" {
-				fmt.Println("connection_watchdog: No reconnection detected after 10 seconds, simulating reconnection...")
+				logln("connection_watchdog: No reconnection detected after 10 seconds, simulating reconnection...")
 				p.state = "loading"
 				p.signalLocked()
 				p.mu.Unlock()
@@ -169,16 +169,16 @@ type PowerStateMQTT struct {
 func NewPowerStateMQTT() *PowerStateMQTT {
 	tasmotaID := getenv("TASMOTA_ID", "XXXXXX")
 	p := &PowerStateMQTT{
-		host:             getenv("MQTT_HOST", "localhost"),
-		port:             atoiDefault(getenv("MQTT_PORT", "1883"), 1883),
-		tasmota:          tasmotaID,
-		lwtTopic:         fmt.Sprintf("tele/tasmota_%s/LWT", tasmotaID),
-		powerTopic:       fmt.Sprintf("stat/tasmota_%s/POWER", tasmotaID),
+		host:              getenv("MQTT_HOST", "localhost"),
+		port:              atoiDefault(getenv("MQTT_PORT", "1883"), 1883),
+		tasmota:           tasmotaID,
+		lwtTopic:          fmt.Sprintf("tele/tasmota_%s/LWT", tasmotaID),
+		powerTopic:        fmt.Sprintf("stat/tasmota_%s/POWER", tasmotaID),
 		powerCommandTopic: fmt.Sprintf("cmnd/tasmota_%s/POWER", tasmotaID),
-		notifyCh:         make(chan struct{}),
-		state:            "disconnected",
-		stopCh:           make(chan struct{}),
-		doneCh:           make(chan struct{}),
+		notifyCh:          make(chan struct{}),
+		state:             "disconnected",
+		stopCh:            make(chan struct{}),
+		doneCh:            make(chan struct{}),
 	}
 	go p.mqttManager()
 	return p
@@ -228,7 +228,7 @@ func (p *PowerStateMQTT) WaitForChange(ctx context.Context, fromState string, ti
 func (p *PowerStateMQTT) RequestStateChange(newState string) {
 	p.mu.Lock()
 	if p.state != "on" && p.state != "off" {
-		fmt.Printf("request_state_change: Ignoring state change request to '%s' because current state is '%s'\n", newState, p.state)
+		logf("request_state_change: Ignoring state change request to '%s' because current state is '%s'\n", newState, p.state)
 		p.mu.Unlock()
 		return
 	}
@@ -243,11 +243,11 @@ func (p *PowerStateMQTT) RequestStateChange(newState string) {
 	if (newState == "on" || newState == "off") && client != nil {
 		token := client.Publish(topic, 0, false, strings.ToUpper(newState))
 		if token.WaitTimeout(5*time.Second) && token.Error() == nil {
-			fmt.Printf("request_state_change: Published MQTT message to change state to '%s'\n", newState)
+			logf("request_state_change: Published MQTT message to change state to '%s'\n", newState)
 			return
 		}
 		if err := token.Error(); err != nil {
-			fmt.Println("Failed to publish MQTT message:", err)
+			logln("Failed to publish MQTT message:", err)
 		}
 	}
 
@@ -255,7 +255,7 @@ func (p *PowerStateMQTT) RequestStateChange(newState string) {
 	p.mu.Lock()
 	p.state = "disconnected"
 	p.disconnectCount++
-	fmt.Println("request_state_change: Failed to publish MQTT message, setting state to 'disconnected'")
+	logln("request_state_change: Failed to publish MQTT message, setting state to 'disconnected'")
 	p.signalLocked()
 	p.mu.Unlock()
 }
@@ -275,7 +275,7 @@ func (p *PowerStateMQTT) mqttManager() {
 	p.mu.Lock()
 	p.state = "loading"
 	p.loadingCount++
-	fmt.Println("mqtt_manager: state set to 'loading', count:", p.loadingCount)
+	logln("mqtt_manager: state set to 'loading', count:", p.loadingCount)
 	p.signalLocked()
 	p.mu.Unlock()
 
@@ -291,13 +291,13 @@ func (p *PowerStateMQTT) mqttManager() {
 		}
 
 		if needReconnect {
-			fmt.Println("mqtt_manager: Attempting to start MQTT client...")
+			logln("mqtt_manager: Attempting to start MQTT client...")
 			p.startClient()
 			needReconnect = false
 		}
 
 		if needDisconnect {
-			fmt.Println("mqtt_manager: Attempting to clean up MQTT client...")
+			logln("mqtt_manager: Attempting to clean up MQTT client...")
 			p.cleanupClient()
 			p.mu.Lock()
 			p.state = "disconnected"
@@ -324,7 +324,7 @@ func (p *PowerStateMQTT) mqttManager() {
 
 		p.mu.Lock()
 		if p.state == "disconnected" && prevState == "disconnected" && p.disconnectCount == prevDisconnectCount {
-			fmt.Printf("mqtt_manager: Detected prolonged disconnected state (count %d), will attempt to reconnect...\n", p.disconnectCount)
+			logf("mqtt_manager: Detected prolonged disconnected state (count %d), will attempt to reconnect...\n", p.disconnectCount)
 			p.state = "loading"
 			p.loadingCount++
 			p.signalLocked()
@@ -333,7 +333,7 @@ func (p *PowerStateMQTT) mqttManager() {
 			continue
 		}
 		if p.state == "loading" && prevState == "loading" && p.loadingCount == prevLoadingCount {
-			fmt.Printf("mqtt_manager: Detected prolonged loading state (count %d), disconnecting\n", p.loadingCount)
+			logf("mqtt_manager: Detected prolonged loading state (count %d), disconnecting\n", p.loadingCount)
 			needDisconnect = true
 			p.mu.Unlock()
 			continue
@@ -350,24 +350,24 @@ func (p *PowerStateMQTT) startClient() {
 	opts.SetAutoReconnect(false)
 	opts.SetOnConnectHandler(func(c mqtt.Client) {
 		if token := c.Subscribe(p.lwtTopic, 0, nil); token.Wait() && token.Error() != nil {
-			fmt.Println("Subscribe error for LWT topic:", token.Error())
+			logln("Subscribe error for LWT topic:", token.Error())
 		}
 		if token := c.Subscribe(p.powerTopic, 0, nil); token.Wait() && token.Error() != nil {
-			fmt.Println("Subscribe error for POWER topic:", token.Error())
+			logln("Subscribe error for POWER topic:", token.Error())
 		}
-		fmt.Printf("Subscribed to MQTT topics: %s, %s\n", p.lwtTopic, p.powerTopic)
+		logf("Subscribed to MQTT topics: %s, %s\n", p.lwtTopic, p.powerTopic)
 		c.Publish(p.powerCommandTopic, 0, false, "")
 	})
 	opts.SetConnectionLostHandler(func(c mqtt.Client, err error) {
 		p.mu.Lock()
 		if p.client != c {
 			p.mu.Unlock()
-			fmt.Println("Received on_disconnect for an old client, ignoring")
+			logln("Received on_disconnect for an old client, ignoring")
 			return
 		}
 		p.state = "disconnected"
 		p.disconnectCount++
-		fmt.Println("state set to 'disconnected' in on_disconnect")
+		logln("state set to 'disconnected' in on_disconnect")
 		p.signalLocked()
 		p.mu.Unlock()
 	})
@@ -380,7 +380,7 @@ func (p *PowerStateMQTT) startClient() {
 	p.client = client
 	p.mu.Unlock()
 
-	fmt.Printf("Attempting to connect to MQTT broker at %s:%d...\n", p.host, p.port)
+	logf("Attempting to connect to MQTT broker at %s:%d...\n", p.host, p.port)
 	connectStart := time.Now()
 	token := client.Connect()
 	if !token.WaitTimeout(10*time.Second) || token.Error() != nil {
@@ -389,7 +389,7 @@ func (p *PowerStateMQTT) startClient() {
 		if err == nil {
 			err = fmt.Errorf("timeout")
 		}
-		fmt.Printf("_start_client: MQTT connection failed after %.2f seconds: %v\n", elapsed, err)
+		logf("_start_client: MQTT connection failed after %.2f seconds: %v\n", elapsed, err)
 		p.mu.Lock()
 		p.state = "disconnected"
 		p.disconnectCount++
@@ -398,7 +398,7 @@ func (p *PowerStateMQTT) startClient() {
 		p.cleanupClient()
 		return
 	}
-	fmt.Printf("MQTT client connected successfully after %.2f seconds\n", time.Since(connectStart).Seconds())
+	logf("MQTT client connected successfully after %.2f seconds\n", time.Since(connectStart).Seconds())
 }
 
 func (p *PowerStateMQTT) cleanupClient() {
@@ -414,20 +414,20 @@ func (p *PowerStateMQTT) cleanupClient() {
 func (p *PowerStateMQTT) onMessage(client mqtt.Client, msg mqtt.Message) {
 	topic := msg.Topic()
 	payload := strings.TrimSpace(string(msg.Payload()))
-	fmt.Printf("Received MQTT message: %s %s\n", topic, payload)
+	logf("Received MQTT message: %s %s\n", topic, payload)
 
 	cleanupNeeded := false
 	p.mu.Lock()
 	if strings.HasSuffix(topic, "/LWT") {
 		if payload == "Online" {
-			fmt.Println("MQTT LWT indicates device is online")
+			logln("MQTT LWT indicates device is online")
 		} else {
-			fmt.Println("MQTT LWT indicates device is offline")
+			logln("MQTT LWT indicates device is offline")
 			cleanupNeeded = true
 		}
 	} else if strings.HasSuffix(topic, "/POWER") {
 		if payload == "ON" || payload == "OFF" {
-			fmt.Printf("MQTT POWER state changed to %s\n", payload)
+			logf("MQTT POWER state changed to %s\n", payload)
 			p.state = strings.ToLower(payload)
 			p.signalLocked()
 		}
@@ -441,7 +441,7 @@ func (p *PowerStateMQTT) onMessage(client mqtt.Client, msg mqtt.Message) {
 		if p.state != "loading" {
 			p.state = "loading"
 			p.loadingCount++
-			fmt.Println("mqtt_manager: state set to 'loading', count:", p.loadingCount)
+			logln("mqtt_manager: state set to 'loading', count:", p.loadingCount)
 			p.signalLocked()
 		}
 		p.mu.Unlock()
@@ -467,4 +467,13 @@ func atoiDefault(s string, fallback int) int {
 		return fallback
 	}
 	return v
+}
+
+func logf(format string, args ...any) {
+	fmt.Printf(time.Now().Format("2006-01-02 15:04:05.000 ")+format, args...)
+}
+
+func logln(args ...any) {
+	all := append([]any{time.Now().Format("2006-01-02 15:04:05.000")}, args...)
+	fmt.Println(all...)
 }
