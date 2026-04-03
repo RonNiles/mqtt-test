@@ -97,7 +97,7 @@ func TestStreamEventsReturnsOnClientDisconnect(t *testing.T) {
 	if gotFrom != initialState {
 		t.Fatalf("expected fromState %q, got %q", initialState, gotFrom)
 	}
-	if gotTimeout != 120*time.Second {
-		t.Fatalf("expected heartbeat timeout %v, got %v", 120*time.Second, gotTimeout)
+	if gotTimeout != 20*time.Second {
+		t.Fatalf("expected heartbeat timeout %v, got %v", 20*time.Second, gotTimeout)
 	}
 }

@@ -13,7 +13,7 @@ import (
 
 const (
 	brokerKeepAlive = 60 * time.Second
-	clientID        = "on-off controller"
+	clientIDPrefix  = "on-off-controller"
 )
 
 type PowerState interface {
@@ -147,6 +147,8 @@ func (p *PowerStateEmulator) signalLocked() {
 }
 
 type PowerStateMQTT struct {
+	clientID string
+
 	host    string
 	port    int
 	tasmota string
@@ -168,7 +170,10 @@ type PowerStateMQTT struct {
 
 func NewPowerStateMQTT() *PowerStateMQTT {
 	tasmotaID := getenv("TASMOTA_ID", "XXXXXX")
+	hostname, _ := os.Hostname()
+	defaultClientID := fmt.Sprintf("%s-%s-%d", clientIDPrefix, strings.ReplaceAll(hostname, " ", "-"), os.Getpid())
 	p := &PowerStateMQTT{
+		clientID:          getenv("MQTT_CLIENT_ID", defaultClientID),
 		host:              getenv("MQTT_HOST", "localhost"),
 		port:              atoiDefault(getenv("MQTT_PORT", "1883"), 1883),
 		tasmota:           tasmotaID,
@@ -345,7 +350,7 @@ func (p *PowerStateMQTT) mqttManager() {
 func (p *PowerStateMQTT) startClient() {
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(fmt.Sprintf("tcp://%s:%d", p.host, p.port))
-	opts.SetClientID(clientID)
+	opts.SetClientID(p.clientID)
 	opts.SetKeepAlive(brokerKeepAlive)
 	opts.SetAutoReconnect(false)
 	opts.SetOnConnectHandler(func(c mqtt.Client) {
@@ -362,12 +367,12 @@ func (p *PowerStateMQTT) startClient() {
 		p.mu.Lock()
 		if p.client != c {
 			p.mu.Unlock()
-			logln("Received on_disconnect for an old client, ignoring")
+			logln("Received on_disconnect for an old client, ignoring. Reason:", err)
 			return
 		}
 		p.state = "disconnected"
 		p.disconnectCount++
-		logln("state set to 'disconnected' in on_disconnect")
+		logln("state set to 'disconnected' in on_disconnect. Reason:", err)
 		p.signalLocked()
 		p.mu.Unlock()
 	})
