@@ -293,6 +293,39 @@ func handlePower(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"state": value}, http.StatusOK)
 }
 
+func handleTurn(w http.ResponseWriter, state string, bodyText string) {
+	status := http.StatusOK
+	responseBody := bodyText
+
+	host := strings.TrimSpace(os.Getenv("MQTT_HOST"))
+	tasmotaID := strings.TrimSpace(os.Getenv("TASMOTA_ID"))
+	if host == "" || tasmotaID == "" {
+		status = http.StatusInternalServerError
+		responseBody = "Error: HOST and TASMOTA_ID must be set"
+	} else {
+		payload := strings.ToUpper(state)
+		topic := fmt.Sprintf("cmnd/tasmota_%s/POWER", tasmotaID)
+		cmd := exec.Command("mosquitto_pub", "-h", host, "-t", topic, "-m", payload)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			status = http.StatusInternalServerError
+			trimmed := strings.TrimSpace(string(output))
+			if trimmed == "" {
+				responseBody = fmt.Sprintf("Error publishing MQTT command: %v", err)
+			} else {
+				responseBody = fmt.Sprintf("Error publishing MQTT command: %v (%s)", err, trimmed)
+			}
+		}
+	}
+
+	head := `<head><meta http-equiv="refresh" content="1; URL=testtemp.php">` +
+		`<meta name="keywords" content="automatic redirection"></head>`
+	content := []byte("<html>" + head + "<body>" + responseBody + "</body></html>")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+	w.WriteHeader(status)
+	_, _ = w.Write(content)
+}
+
 func writeJSON(w http.ResponseWriter, data map[string]string, status int) {
 	resp, _ := json.Marshal(data)
 	w.Header().Set("Content-Type", "application/json")
@@ -363,6 +396,20 @@ func main() {
 			return
 		}
 		handlePower(w, r)
+	})
+	http.HandleFunc("/turnon.php", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/turnon.php" {
+			http.NotFound(w, r)
+			return
+		}
+		handleTurn(w, "on", "Turned pump on")
+	})
+	http.HandleFunc("/turnoff.php", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/turnoff.php" {
+			http.NotFound(w, r)
+			return
+		}
+		handleTurn(w, "off", "Turned pump off")
 	})
 
 	addr := fmt.Sprintf("%s:%d", *host, *port)
