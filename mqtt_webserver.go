@@ -298,22 +298,23 @@ func handleTurn(w http.ResponseWriter, state string, bodyText string) {
 	responseBody := bodyText
 
 	host := strings.TrimSpace(os.Getenv("MQTT_HOST"))
+	if host == "" {
+		host = "127.0.0.1"
+	}
 	tasmotaID := strings.TrimSpace(os.Getenv("TASMOTA_ID"))
-	if host == "" || tasmotaID == "" {
+	if tasmotaID == "" {
+		tasmotaID = "XXXXXX"
+	}
+	payload := strings.ToUpper(state)
+	topic := fmt.Sprintf("cmnd/tasmota_%s/POWER", tasmotaID)
+	cmd := exec.Command("mosquitto_pub", "-h", host, "-t", topic, "-m", payload)
+	if output, err := cmd.CombinedOutput(); err != nil {
 		status = http.StatusInternalServerError
-		responseBody = "Error: HOST and TASMOTA_ID must be set"
-	} else {
-		payload := strings.ToUpper(state)
-		topic := fmt.Sprintf("cmnd/tasmota_%s/POWER", tasmotaID)
-		cmd := exec.Command("mosquitto_pub", "-h", host, "-t", topic, "-m", payload)
-		if output, err := cmd.CombinedOutput(); err != nil {
-			status = http.StatusInternalServerError
-			trimmed := strings.TrimSpace(string(output))
-			if trimmed == "" {
-				responseBody = fmt.Sprintf("Error publishing MQTT command: %v", err)
-			} else {
-				responseBody = fmt.Sprintf("Error publishing MQTT command: %v (%s)", err, trimmed)
-			}
+		trimmed := strings.TrimSpace(string(output))
+		if trimmed == "" {
+			responseBody = fmt.Sprintf("Error publishing MQTT command: %v", err)
+		} else {
+			responseBody = fmt.Sprintf("Error publishing MQTT command: %v (%s)", err, trimmed)
 		}
 	}
 
