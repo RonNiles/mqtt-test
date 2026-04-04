@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,6 +29,10 @@ type serverState struct {
 	webpageMtimeNano int64
 	powerState       PowerState
 	activeStreamRefs int
+
+	transientPowerState PowerState
+	transientRefs       int
+	transientTimer      *time.Timer
 }
 
 var sharedState = &serverState{}
@@ -67,6 +72,56 @@ func (s *serverState) currentPowerState() PowerState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.powerState
+}
+
+// acquirePowerStateForRequest returns the active stream power state if one exists,
+// otherwise creates (or reuses) a transient PowerStateMQTT and returns it along
+// with a flag indicating the caller is responsible for releasing the transient ref.
+func (s *serverState) acquirePowerStateForRequest() (PowerState, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.powerState != nil {
+		return s.powerState, false
+	}
+	if s.transientTimer != nil {
+		s.transientTimer.Stop()
+		s.transientTimer = nil
+	}
+	s.transientRefs++
+	if s.transientPowerState == nil {
+		s.transientPowerState = NewPowerStateMQTT()
+		logln("Created transient PowerStateMQTT for wait_for_change request")
+	}
+	return s.transientPowerState, true
+}
+
+// releasePowerStateForRequest decrements the transient ref count. When it reaches
+// zero, a 30-second idle timer is started; if no new request arrives the
+// transient PowerStateMQTT is closed.
+func (s *serverState) releasePowerStateForRequest(transient bool) {
+	if !transient {
+		return
+	}
+	s.mu.Lock()
+	s.transientRefs--
+	if s.transientRefs == 0 && s.transientPowerState != nil {
+		s.transientTimer = time.AfterFunc(30*time.Second, func() {
+			s.mu.Lock()
+			if s.transientRefs > 0 {
+				s.mu.Unlock()
+				return
+			}
+			ps := s.transientPowerState
+			s.transientPowerState = nil
+			s.transientTimer = nil
+			s.mu.Unlock()
+			if ps != nil {
+				ps.Close()
+				logln("Closed idle transient PowerStateMQTT after 30s idle")
+			}
+		})
+	}
+	s.mu.Unlock()
 }
 
 func serveRoot(w http.ResponseWriter) {
@@ -112,14 +167,19 @@ func serveTemperature(w http.ResponseWriter) {
 }
 
 func serveMakeGraph(w http.ResponseWriter, r *http.Request) {
-	logf("Received request for %s\n", r.URL.Path)
+	remoteAddr := r.RemoteAddr
+	logf("[%s] Received request for %s\n", remoteAddr, r.URL.Path)
+	now := time.Now()
+	waitDuration := time.Until(now.Truncate(10 * time.Second).Add(10 * time.Second))
+	time.Sleep(waitDuration)
+	logf("[%s] Waited %v to synchronize graph generation\n", remoteAddr, waitDuration)
 	ptsFile, err := os.CreateTemp(".", "dpt_*.tsv")
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Could not create temp points file: %v", err), http.StatusInternalServerError)
 		return
 	}
 	ptsPath := ptsFile.Name()
-	logf("Using temp points file: %s\n", ptsPath)
+	logf("[%s] Using temp points file: %s\n", remoteAddr, ptsPath)
 	_ = ptsFile.Close()
 	defer os.Remove(ptsPath)
 
@@ -129,7 +189,7 @@ func serveMakeGraph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	gphPath := gphFile.Name()
-	logf("Using temp graph file: %s\n", gphPath)
+	logf("[%s] Using temp graph file: %s\n", remoteAddr, gphPath)
 	_ = gphFile.Close()
 	defer os.Remove(gphPath)
 
@@ -160,7 +220,7 @@ func serveMakeGraph(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Could not emphasize final point data: %v", err), http.StatusInternalServerError)
 		return
 	}
-	logf("Points file generated successfully at %s. Size: %d\n", ptsPath, fileSize(ptsPath))
+	logf("[%s] Points file generated successfully at %s. Size: %d\n", remoteAddr, ptsPath, fileSize(ptsPath))
 
 	tempScriptPath := filepath.Join(workDir, "tempscript")
 	gnuplotExpr := fmt.Sprintf("filename='%s';ofilename='%s'", ptsPath, gphPath)
@@ -175,7 +235,7 @@ func serveMakeGraph(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Could not read generated graph: %v", err), http.StatusInternalServerError)
 		return
 	}
-	logf("image file of length %d generated successfully\n", len(content))
+	logf("[%s] Image file of length %d generated successfully\n", remoteAddr, len(content))
 
 	w.Header().Set("Content-Type", "image/png")
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
@@ -184,10 +244,7 @@ func serveMakeGraph(w http.ResponseWriter, r *http.Request) {
 }
 
 func streamEvents(w http.ResponseWriter, r *http.Request) {
-	remotePort := "unknown"
-	if idx := strings.LastIndex(r.RemoteAddr, ":"); idx >= 0 && idx < len(r.RemoteAddr)-1 {
-		remotePort = r.RemoteAddr[idx+1:]
-	}
+	remoteAddr := r.RemoteAddr
 
 	powerState := sharedState.acquirePowerStateForStream()
 	defer sharedState.releasePowerStateForStream()
@@ -205,7 +262,7 @@ func streamEvents(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
-	logf("[%s] Opened event stream\n", remotePort)
+	logf("[%s] Opened event stream\n", remoteAddr)
 	lastState := ""
 	heartbeatInterval := 20 * time.Second
 
@@ -213,7 +270,7 @@ func streamEvents(w http.ResponseWriter, r *http.Request) {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Printf("[%s] Closed event stream\n", remotePort)
+			fmt.Printf("[%s] Closed event stream\n", remoteAddr)
 			return
 		default:
 		}
@@ -233,7 +290,7 @@ func streamEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			cancelWait()
-			logf("[%s] Closed event stream\n", remotePort)
+			logf("[%s] Closed event stream\n", remoteAddr)
 			return
 		case state = <-stateCh:
 			cancelWait()
@@ -242,15 +299,15 @@ func streamEvents(w http.ResponseWriter, r *http.Request) {
 		if state != lastState {
 			payload, _ := json.Marshal(map[string]string{"state": state})
 			if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
-				logf("[%s] Closed event stream\n", remotePort)
+				logf("[%s] Closed event stream\n", remoteAddr)
 				return
 			}
 			flusher.Flush()
 			lastState = state
-			logf("[%s] Sent event: %s\n", remotePort, payload)
+			logf("[%s] Sent event: %s\n", remoteAddr, payload)
 		} else {
 			if _, err := ioWriteString(w, ": keepalive\n\n"); err != nil {
-				logf("[%s] Closed event stream\n", remotePort)
+				logf("[%s] Closed event stream\n", remoteAddr)
 				return
 			}
 			flusher.Flush()
@@ -258,7 +315,32 @@ func streamEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func handleWaitForChange(w http.ResponseWriter, r *http.Request) {
+	remoteAddr := r.RemoteAddr
+
+	fromState := r.URL.Query().Get("state")
+	if fromState == "" {
+		fromState = initialState
+	}
+
+	intervalSecs := 30
+	if s := r.URL.Query().Get("interval"); s != "" {
+		if v, err := strconv.Atoi(s); err == nil && v > 0 {
+			intervalSecs = v
+		}
+	}
+
+	powerState, transient := sharedState.acquirePowerStateForRequest()
+	defer sharedState.releasePowerStateForRequest(transient)
+
+	newState := powerState.WaitForChange(r.Context(), fromState, time.Duration(intervalSecs)*time.Second)
+
+	logf("[%s] wait_for_change: %q -> %q\n", remoteAddr, fromState, newState)
+	writeJSON(w, map[string]string{"state": newState}, http.StatusOK)
+}
+
 func handlePower(w http.ResponseWriter, r *http.Request) {
+	remoteAddr := r.RemoteAddr
 	var body bytes.Buffer
 	_, _ = body.ReadFrom(r.Body)
 	if body.Len() == 0 {
@@ -281,7 +363,7 @@ func handlePower(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	logf("Setting state to %s\n", value)
+	logf("[%s] Setting state to %s\n", remoteAddr, value)
 	powerState := sharedState.currentPowerState()
 	if powerState == nil {
 		writeJSON(w, map[string]string{"error": "No active event stream"}, http.StatusServiceUnavailable)
@@ -293,20 +375,21 @@ func handlePower(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"state": value}, http.StatusOK)
 }
 
-func handleTurn(w http.ResponseWriter, state string, bodyText string) {
+func handleTurn(w http.ResponseWriter, r *http.Request, state string, bodyText string) {
+	remoteAddr := r.RemoteAddr
 	status := http.StatusOK
 	responseBody := bodyText
+	host, tasmotaID := "", ""
 
-	host := strings.TrimSpace(os.Getenv("MQTT_HOST"))
-	if host == "" {
+	if host = strings.TrimSpace(os.Getenv("MQTT_HOST")); host == "" {
 		host = "127.0.0.1"
 	}
-	tasmotaID := strings.TrimSpace(os.Getenv("TASMOTA_ID"))
-	if tasmotaID == "" {
+	if tasmotaID = strings.TrimSpace(os.Getenv("TASMOTA_ID")); tasmotaID == "" {
 		tasmotaID = "XXXXXX"
 	}
 	payload := strings.ToUpper(state)
 	topic := fmt.Sprintf("cmnd/tasmota_%s/POWER", tasmotaID)
+	logf("[%s] Publishing MQTT %s to %s\n", remoteAddr, payload, topic)
 	cmd := exec.Command("mosquitto_pub", "-h", host, "-t", topic, "-m", payload)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		status = http.StatusInternalServerError
@@ -391,6 +474,13 @@ func main() {
 		}
 		streamEvents(w, r)
 	})
+	http.HandleFunc("/api/wait_for_change", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		handleWaitForChange(w, r)
+	})
 	http.HandleFunc("/api/power", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.NotFound(w, r)
@@ -403,14 +493,14 @@ func main() {
 			http.NotFound(w, r)
 			return
 		}
-		handleTurn(w, "on", "Turned pump on")
+		handleTurn(w, r, "on", "Turned pump on")
 	})
 	http.HandleFunc("/turnoff.php", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/turnoff.php" {
 			http.NotFound(w, r)
 			return
 		}
-		handleTurn(w, "off", "Turned pump off")
+		handleTurn(w, r, "off", "Turned pump off")
 	})
 
 	addr := fmt.Sprintf("%s:%d", *host, *port)
