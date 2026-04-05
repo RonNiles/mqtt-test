@@ -29,10 +29,8 @@ type serverState struct {
 	webpageMtimeNano int64
 	powerState       PowerState
 	activeStreamRefs int
-
-	transientPowerState PowerState
-	transientRefs       int
-	transientTimer      *time.Timer
+	transientRefs    int
+	transientTimer   *time.Timer
 }
 
 var sharedState = &serverState{}
@@ -41,9 +39,15 @@ func (s *serverState) acquirePowerStateForStream() PowerState {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.activeStreamRefs++
-	if s.activeStreamRefs == 1 || s.powerState == nil {
+	if s.transientTimer != nil {
+		s.transientTimer.Stop()
+		s.transientTimer = nil
+	}
+	if s.powerState == nil {
 		s.powerState = NewPowerStateMQTT()
 		logln("Created PowerStateMQTT for first active event stream")
+	} else if s.activeStreamRefs == 1 {
+		logln("Reusing existing PowerStateMQTT for first active event stream")
 	}
 	return s.powerState
 }
@@ -56,7 +60,7 @@ func (s *serverState) releasePowerStateForStream() {
 		return
 	}
 	s.activeStreamRefs--
-	if s.activeStreamRefs == 0 {
+	if s.activeStreamRefs == 0 && s.transientRefs == 0 {
 		stateToClose = s.powerState
 		s.powerState = nil
 		logln("No active event streams remain; closing PowerStateMQTT")
@@ -75,12 +79,12 @@ func (s *serverState) currentPowerState() PowerState {
 }
 
 // acquirePowerStateForRequest returns the active stream power state if one exists,
-// otherwise creates (or reuses) a transient PowerStateMQTT and returns it along
-// with a flag indicating the caller is responsible for releasing the transient ref.
+// otherwise creates (or reuses) a shared PowerStateMQTT and increments the transient
+// ref count, returning a flag indicating the caller must release the transient ref.
 func (s *serverState) acquirePowerStateForRequest() (PowerState, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.powerState != nil {
+	if s.activeStreamRefs > 0 {
 		return s.powerState, false
 	}
 	if s.transientTimer != nil {
@@ -88,36 +92,36 @@ func (s *serverState) acquirePowerStateForRequest() (PowerState, bool) {
 		s.transientTimer = nil
 	}
 	s.transientRefs++
-	if s.transientPowerState == nil {
-		s.transientPowerState = NewPowerStateMQTT()
-		logln("Created transient PowerStateMQTT for wait_for_change request")
+	if s.powerState == nil {
+		s.powerState = NewPowerStateMQTT()
+		logln("Created PowerStateMQTT for wait_for_change request")
 	}
-	return s.transientPowerState, true
+	return s.powerState, true
 }
 
 // releasePowerStateForRequest decrements the transient ref count. When it reaches
-// zero, a 30-second idle timer is started; if no new request arrives the
-// transient PowerStateMQTT is closed.
+// zero (with no active streams), a 30-second idle timer is started; if no new
+// request arrives the PowerStateMQTT is closed.
 func (s *serverState) releasePowerStateForRequest(transient bool) {
 	if !transient {
 		return
 	}
 	s.mu.Lock()
 	s.transientRefs--
-	if s.transientRefs == 0 && s.transientPowerState != nil {
+	if s.transientRefs == 0 && s.activeStreamRefs == 0 && s.powerState != nil {
 		s.transientTimer = time.AfterFunc(30*time.Second, func() {
 			s.mu.Lock()
-			if s.transientRefs > 0 {
+			if s.transientRefs > 0 || s.activeStreamRefs > 0 {
 				s.mu.Unlock()
 				return
 			}
-			ps := s.transientPowerState
-			s.transientPowerState = nil
+			ps := s.powerState
+			s.powerState = nil
 			s.transientTimer = nil
 			s.mu.Unlock()
 			if ps != nil {
 				ps.Close()
-				logln("Closed idle transient PowerStateMQTT after 30s idle")
+				logln("Closed idle PowerStateMQTT after 30s idle")
 			}
 		})
 	}
@@ -329,7 +333,7 @@ func handleWaitForChange(w http.ResponseWriter, r *http.Request) {
 			intervalSecs = v
 		}
 	}
-
+	logf("[%s] Received wait_for_change request: from=%q, interval=%d\n", remoteAddr, fromState, intervalSecs)
 	powerState, transient := sharedState.acquirePowerStateForRequest()
 	defer sharedState.releasePowerStateForRequest(transient)
 

@@ -8,12 +8,6 @@
 
   <title>Temperature Update</title>
   <style>
-    :root {
-      --pump-green: #4bd964;
-      --pump-orange: #ff9500;
-      --pump-disabled: #9ba2b5;
-    }
-
     .pump-controls {
       display: flex;
       flex-direction: column;
@@ -60,35 +54,39 @@
 
     .pump-switch .toggle {
       position: absolute;
+      display: -webkit-flex;
       display: flex;
+      -webkit-justify-content: center;
       justify-content: center;
+      -webkit-align-items: center;
       align-items: center;
       width: 4rem;
       height: 4rem;
       border-radius: 50%;
+      -webkit-transition: width 250ms ease-out, left 250ms ease-out;
       transition: width 250ms ease-out, left 250ms ease-out;
       left: 0;
-      background: var(--pump-orange);
+      background: #ff9500;
     }
 
     .pump-switch.loading .toggle {
       width: 4rem;
-      background: var(--pump-disabled);
+      background: #9ba2b5;
     }
 
     .pump-switch[data-state="on"] .toggle {
       left: calc(100% - 4rem);
-      background: var(--pump-green);
+      background: #4bd964;
     }
 
     .pump-switch[data-state="off"] .toggle {
       left: 0;
-      background: var(--pump-orange);
+      background: #ff9500;
     }
 
     .pump-switch[data-state="disconnected"] .toggle {
       left: calc(50% - 2rem);
-      background: var(--pump-disabled);
+      background: #9ba2b5;
     }
 
     .pump-status {
@@ -124,6 +122,7 @@
       border-radius: 50%;
       display: inline-block;
       box-sizing: border-box;
+      -webkit-animation: pump-rotate 1s linear infinite;
       animation: pump-rotate 1s linear infinite;
     }
 
@@ -131,18 +130,18 @@
       opacity: 1;
     }
 
+    @-webkit-keyframes pump-rotate {
+      0%   { -webkit-transform: rotate(0deg);   transform: rotate(0deg); }
+      100% { -webkit-transform: rotate(360deg); transform: rotate(360deg); }
+    }
     @keyframes pump-rotate {
-      0% {
-        transform: rotate(0deg);
-      }
-
-      100% {
-        transform: rotate(360deg);
-      }
+      0%   { -webkit-transform: rotate(0deg);   transform: rotate(0deg); }
+      100% { -webkit-transform: rotate(360deg); transform: rotate(360deg); }
     }
   </style>
 </head>
 <body>
+
   <table border="0">
     <tr valign="top">
       <td bgcolor="#aaa" width="640">
@@ -180,27 +179,21 @@
   </table>
 
   <script>
-    const pumpSwitch = document.querySelector('.pump-switch');
-    const pumpToggle = document.getElementById('pump-toggle');
-    const pumpStatus = document.getElementById('pump-status');
+    var pumpSwitch = document.querySelector('.pump-switch');
+    var pumpToggle = document.getElementById('pump-toggle');
+    var pumpStatus = document.getElementById('pump-status');
 
     function setPumpStatus(state) {
-      const normalizedState = state.toLowerCase();
-      const labels = {
-        on: 'On',
-        off: 'Off',
-        disconnected: 'Disconnected',
-        loading: 'Loading'
-      };
-
+      var normalizedState = state.toLowerCase();
+      var labels = { on: 'On', off: 'Off', disconnected: 'Disconnected', loading: 'Loading' };
       pumpStatus.dataset.state = normalizedState;
       pumpStatus.textContent = labels[normalizedState] || normalizedState;
     }
 
     function applyPumpState(state) {
       pumpSwitch.dataset.state = state;
-      pumpToggle.checked = state === 'on';
-      pumpToggle.indeterminate = state === 'disconnected';
+      pumpToggle.checked = (state === 'on');
+      pumpToggle.indeterminate = (state === 'disconnected');
       setPumpStatus(state);
     }
 
@@ -210,54 +203,42 @@
         setPumpStatus(state);
         return;
       }
-
       pumpSwitch.classList.remove('loading');
       applyPumpState(state.toLowerCase());
     }
 
-    async function getJson(url, options = {}) {
-      const response = await fetch(url, {
-        ...options,
-        headers: {
-          'Content-Type': 'application/json',
-          ...(options.headers || {})
-        }
+    // Returns a Promise resolving to the parsed JSON payload.
+    // method: 'GET' or 'POST', bodyStr: optional JSON string
+    function getJson(url, method, bodyStr) {
+      var opts = { method: method || 'GET', headers: { 'Content-Type': 'application/json' } };
+      if (bodyStr !== undefined) { opts.body = bodyStr; }
+      return fetch(url, opts).then(function(response) {
+        var status = response.status;
+        var ok = response.ok;
+        var statusText = response.statusText;
+        return response.json().then(
+          function(payload) {
+            if (!ok) { throw new Error(payload.error || (status + ' ' + statusText)); }
+            return payload;
+          },
+          function() {
+            if (!ok) { throw new Error(status + ' ' + statusText); }
+            return {};
+          }
+        );
       });
-
-      let payload = {};
-      try {
-        payload = await response.json();
-      } catch (error) {
-        payload = {};
-      }
-
-      if (!response.ok) {
-        const message = payload.error || `${response.status} ${response.statusText}`;
-        throw new Error(message);
-      }
-
-      return payload;
     }
 
-    async function sendPower(value) {
-      try {
-        await getJson('/api/power', {
-          method: 'POST',
-          body: JSON.stringify({ value })
-        });
-      } catch (error) {
+    function sendPower(value) {
+      getJson('/api/power', 'POST', JSON.stringify({ value: value })).catch(function(error) {
         pumpSwitch.classList.remove('loading');
-        console.error('Error sending power state:', error);
-      }
+      });
     }
 
-    pumpSwitch.addEventListener('click', (event) => {
+    pumpSwitch.addEventListener('click', function(event) {
       event.preventDefault();
-      if (pumpSwitch.classList.contains('loading')) {
-        return;
-      }
-
-      const currentState = pumpSwitch.dataset.state || 'disconnected';
+      if (pumpSwitch.classList.contains('loading')) { return; }
+      var currentState = pumpSwitch.dataset.state || 'disconnected';
       if (currentState === 'on') {
         pumpSwitch.classList.add('loading');
         sendPower('OFF');
@@ -267,30 +248,24 @@
       }
     });
 
-    function waitLoop() {
-      applyPumpState('disconnected');
-      pumpSwitch.classList.add('loading');
-      const eventSource = new EventSource('/api/events');
-
-      eventSource.onmessage = (event) => {
-        try {
-          const payload = JSON.parse(event.data);
-          if (payload.state) {
-            applyRemoteState(payload.state);
-          }
-        } catch (error) {
-          console.error('Error parsing event stream payload:', error);
+    function poll(currentState) {
+      var url = '/api/wait_for_change?interval=30' + (currentState ? ('&state=' + encodeURIComponent(currentState)) : '');
+      getJson(url).then(function(payload) {
+        if (payload.state) {
+          applyRemoteState(payload.state);
+          poll(payload.state);
+        } else {
+          poll(currentState);
         }
-      };
-
-      eventSource.onerror = () => {
+      }).catch(function(error) {
         pumpSwitch.classList.add('loading');
-      };
-
-      return eventSource;
+        setTimeout(function() { poll(currentState); }, 5000);
+      });
     }
 
-    waitLoop();
+    applyPumpState('disconnected');
+    pumpSwitch.classList.add('loading');
+    poll('');
   </script>
 
 </body>

@@ -113,27 +113,28 @@
       sendPower("DISCONNECTED");
     });
 
-    function waitLoop() {
+    async function waitLoop() {
       applyState(primarySwitch, 'disconnected');
       primarySwitch.classList.add('loading');
-      const eventSource = new EventSource('/api/events');
 
-      eventSource.onmessage = (event) => {
+      let currentState = '';
+      while (true) {
+        const params = new URLSearchParams({ interval: '30' });
+        if (currentState) {
+          params.set('state', currentState);
+        }
         try {
-          const payload = JSON.parse(event.data);
+          const payload = await getJson(`/api/wait_for_change?${params}`);
           if (payload.state) {
             applyRemoteState(payload.state);
+            currentState = payload.state;
           }
         } catch (error) {
-          console.error('Error parsing event stream payload:', error);
+          console.error('Error polling wait_for_change:', error);
+          primarySwitch.classList.add('loading');
+          await new Promise(resolve => setTimeout(resolve, 3000));
         }
-      };
-
-      eventSource.onerror = () => {
-        primarySwitch.classList.add('loading');
-      };
-
-      return eventSource;
+      }
     }
 
     waitLoop();
