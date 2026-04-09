@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -24,16 +25,36 @@ const (
 )
 
 type serverState struct {
-	mu               sync.Mutex
-	webpageCache     []byte
-	webpageMtimeNano int64
-	powerState       PowerState
-	activeStreamRefs int
-	transientRefs    int
-	transientTimer   *time.Timer
+	mu                sync.Mutex
+	webpageCache      []byte
+	webpageMtimeNano  int64
+	powerState        PowerState
+	activeStreamRefs  int
+	transientRefs     int
+	transientTimer    *time.Timer
+	makeGraphLastCall map[string]time.Time // IP -> last makegraph.php call time
 }
 
 var sharedState = &serverState{}
+
+func (s *serverState) recordMakeGraphCall(ip string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.makeGraphLastCall == nil {
+		s.makeGraphLastCall = make(map[string]time.Time)
+	}
+	s.makeGraphLastCall[ip] = time.Now()
+}
+
+func (s *serverState) hasMakeGraphCallWithin(ip string, d time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.makeGraphLastCall == nil {
+		return false
+	}
+	t, ok := s.makeGraphLastCall[ip]
+	return ok && time.Since(t) <= d
+}
 
 func (s *serverState) acquirePowerStateForStream() PowerState {
 	s.mu.Lock()
@@ -173,10 +194,20 @@ func serveTemperature(w http.ResponseWriter) {
 func serveMakeGraph(w http.ResponseWriter, r *http.Request) {
 	remoteAddr := r.RemoteAddr
 	logf("[%s] Received request for %s\n", remoteAddr, r.URL.Path)
+	ip, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		ip = remoteAddr
+	}
+	// don't synchronize graph generation if the same client hasn't made a makegraph.php call within the last 3 minutes
+	// they should get instant response in this case
+	synchronize := sharedState.hasMakeGraphCallWithin(ip, 3*time.Minute)
+	sharedState.recordMakeGraphCall(ip)
 	now := time.Now()
 	waitDuration := time.Until(now.Truncate(10 * time.Second).Add(10 * time.Second))
-	time.Sleep(waitDuration)
-	logf("[%s] Waited %v to synchronize graph generation\n", remoteAddr, waitDuration)
+	if synchronize {
+		time.Sleep(waitDuration)
+		logf("[%s] Waited %v to synchronize graph generation\n", remoteAddr, waitDuration)
+	}
 	ptsFile, err := os.CreateTemp(".", "dpt_*.tsv")
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Could not create temp points file: %v", err), http.StatusInternalServerError)
@@ -321,6 +352,25 @@ func streamEvents(w http.ResponseWriter, r *http.Request) {
 
 func handleWaitForChange(w http.ResponseWriter, r *http.Request) {
 	remoteAddr := r.RemoteAddr
+
+	ip, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		ip = remoteAddr
+	}
+	if !sharedState.hasMakeGraphCallWithin(ip, 3*time.Minute) {
+		logf("[%s] wait_for_change: no makegraph.php call in last 3 minutes, resetting connection\n", remoteAddr)
+		if hijacker, ok := w.(http.Hijacker); ok {
+			if conn, _, hijackErr := hijacker.Hijack(); hijackErr == nil {
+				if tc, ok2 := conn.(*net.TCPConn); ok2 {
+					_ = tc.SetLinger(0)
+				}
+				_ = conn.Close()
+				return
+			}
+		}
+		http.Error(w, "No recent makegraph.php activity", http.StatusServiceUnavailable)
+		return
+	}
 
 	fromState := r.URL.Query().Get("state")
 	if fromState == "" {
