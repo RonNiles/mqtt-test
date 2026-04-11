@@ -45,6 +45,7 @@
       opacity: 0;
       top: -20px;
       pointer-events: none;
+      outline: none;
     }
 
     .pump-switch.loading {

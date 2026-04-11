@@ -24,36 +24,56 @@ const (
 	initialState    = "__initial__"
 )
 
+type clientActivity struct {
+	lastMakeGraphCall    time.Time
+	waitForChangeSeconds int
+}
+
 type serverState struct {
-	mu                sync.Mutex
-	webpageCache      []byte
-	webpageMtimeNano  int64
-	powerState        PowerState
-	activeStreamRefs  int
-	transientRefs     int
-	transientTimer    *time.Timer
-	makeGraphLastCall map[string]time.Time // IP -> last makegraph.php call time
+	mu               sync.Mutex
+	webpageCache     []byte
+	webpageMtimeNano int64
+	powerState       PowerState
+	activeStreamRefs int
+	transientRefs    int
+	transientTimer   *time.Timer
+	clientActivities map[string]*clientActivity // IP -> client activity
 }
 
 var sharedState = &serverState{}
 
+func (s *serverState) lockedGetClientActivity(ip string) *clientActivity {
+	if s.clientActivities == nil {
+		s.clientActivities = make(map[string]*clientActivity)
+	}
+	if _, exists := s.clientActivities[ip]; !exists {
+		s.clientActivities[ip] = &clientActivity{}
+	}
+	return s.clientActivities[ip]
+}
+
 func (s *serverState) recordMakeGraphCall(ip string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.makeGraphLastCall == nil {
-		s.makeGraphLastCall = make(map[string]time.Time)
-	}
-	s.makeGraphLastCall[ip] = time.Now()
+	activity := s.lockedGetClientActivity(ip)
+	activity.waitForChangeSeconds = 0
+	activity.lastMakeGraphCall = time.Now()
+}
+
+func (s *serverState) shouldHangupWaitForChange(ip string, seconds int) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	activity := s.lockedGetClientActivity(ip)
+	activity.waitForChangeSeconds += seconds
+	logf("Checking if client %s should be hung up: %d seconds\n", ip, activity.waitForChangeSeconds)
+	return activity.waitForChangeSeconds > 180
 }
 
 func (s *serverState) hasMakeGraphCallWithin(ip string, d time.Duration) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.makeGraphLastCall == nil {
-		return false
-	}
-	t, ok := s.makeGraphLastCall[ip]
-	return ok && time.Since(t) <= d
+	activity := s.lockedGetClientActivity(ip)
+	return !activity.lastMakeGraphCall.IsZero() && time.Since(activity.lastMakeGraphCall) <= d
 }
 
 func (s *serverState) acquirePowerStateForStream() PowerState {
@@ -208,66 +228,26 @@ func serveMakeGraph(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(waitDuration)
 		logf("[%s] Waited %v to synchronize graph generation\n", remoteAddr, waitDuration)
 	}
-	ptsFile, err := os.CreateTemp(".", "dpt_*.tsv")
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Could not create temp points file: %v", err), http.StatusInternalServerError)
-		return
-	}
-	ptsPath := ptsFile.Name()
-	logf("[%s] Using temp points file: %s\n", remoteAddr, ptsPath)
-	_ = ptsFile.Close()
-	defer os.Remove(ptsPath)
-
-	gphFile, err := os.CreateTemp(".", "gph_*.png")
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Could not create temp graph file: %v", err), http.StatusInternalServerError)
-		return
-	}
-	gphPath := gphFile.Name()
-	logf("[%s] Using temp graph file: %s\n", remoteAddr, gphPath)
-	_ = gphFile.Close()
-	defer os.Remove(gphPath)
-
-	workDir := "."
 	cmdCtx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 
-	getPtsCmd := exec.CommandContext(cmdCtx, "./getpts.sh", ptsPath)
-	getPtsCmd.Dir = workDir
-	output, cmdErr := getPtsCmd.CombinedOutput()
+	cmd := exec.CommandContext(cmdCtx, "bash", "-c", `OUT=$(./getpts.sh); printf "\$DATA << EOD\n$OUT\nEOD" | cat - tempscript2 | gnuplot`)
+	cmd.Dir = "."
+	content, cmdErr := cmd.Output()
 	if cmdErr != nil {
-		http.Error(w, fmt.Sprintf("getpts.sh failed: %v\n%s", cmdErr, strings.TrimSpace(string(output))), http.StatusInternalServerError)
-		return
-	}
-
-	if len(output) > 0 {
-		if writeErr := os.WriteFile(ptsPath, output, 0o644); writeErr != nil {
-			http.Error(w, fmt.Sprintf("Could not write points output to %s: %v", ptsPath, writeErr), http.StatusInternalServerError)
-			return
+		stderr := ""
+		if ee, ok := cmdErr.(*exec.ExitError); ok {
+			stderr = strings.TrimSpace(string(ee.Stderr))
 		}
-	}
-
-	if fileSize(ptsPath) <= 0 {
-		http.Error(w, "getpts.sh produced no point data", http.StatusInternalServerError)
+		if stderr != "" {
+			http.Error(w, fmt.Sprintf("graph generation failed: %v\n%s", cmdErr, stderr), http.StatusInternalServerError)
+		} else {
+			http.Error(w, fmt.Sprintf("graph generation failed: %v", cmdErr), http.StatusInternalServerError)
+		}
 		return
 	}
-	if err := appendEmphasizedFinalPoint(cmdCtx, ptsPath); err != nil {
-		http.Error(w, fmt.Sprintf("Could not emphasize final point data: %v", err), http.StatusInternalServerError)
-		return
-	}
-	logf("[%s] Points file generated successfully at %s. Size: %d\n", remoteAddr, ptsPath, fileSize(ptsPath))
-
-	tempScriptPath := filepath.Join(workDir, "tempscript")
-	gnuplotExpr := fmt.Sprintf("filename='%s';ofilename='%s'", ptsPath, gphPath)
-	gnuplotCmd := exec.CommandContext(cmdCtx, "gnuplot", "-e", gnuplotExpr, tempScriptPath)
-	gnuplotCmd.Dir = workDir
-	if output, cmdErr := gnuplotCmd.CombinedOutput(); cmdErr != nil {
-		http.Error(w, fmt.Sprintf("gnuplot failed: %v\n%s", cmdErr, strings.TrimSpace(string(output))), http.StatusInternalServerError)
-		return
-	}
-	content, err := os.ReadFile(gphPath)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Could not read generated graph: %v", err), http.StatusInternalServerError)
+	if len(content) == 0 {
+		http.Error(w, "graph generation produced no output", http.StatusInternalServerError)
 		return
 	}
 	logf("[%s] Image file of length %d generated successfully\n", remoteAddr, len(content))
@@ -351,14 +331,26 @@ func streamEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleWaitForChange(w http.ResponseWriter, r *http.Request) {
+	fromState := r.URL.Query().Get("state")
+	if fromState == "" {
+		fromState = initialState
+	}
+
+	intervalSecs := 30
+	if s := r.URL.Query().Get("interval"); s != "" {
+		if v, err := strconv.Atoi(s); err == nil && v > 0 {
+			intervalSecs = v
+		}
+	}
+
 	remoteAddr := r.RemoteAddr
 
 	ip, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
 		ip = remoteAddr
 	}
-	if !sharedState.hasMakeGraphCallWithin(ip, 3*time.Minute) {
-		logf("[%s] wait_for_change: no makegraph.php call in last 3 minutes, resetting connection\n", remoteAddr)
+	if sharedState.shouldHangupWaitForChange(ip, intervalSecs) {
+		logf("[%s] wait_for_change: no recent makegraph.activity, resetting connection\n", remoteAddr)
 		if hijacker, ok := w.(http.Hijacker); ok {
 			if conn, _, hijackErr := hijacker.Hijack(); hijackErr == nil {
 				if tc, ok2 := conn.(*net.TCPConn); ok2 {
@@ -372,17 +364,6 @@ func handleWaitForChange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fromState := r.URL.Query().Get("state")
-	if fromState == "" {
-		fromState = initialState
-	}
-
-	intervalSecs := 30
-	if s := r.URL.Query().Get("interval"); s != "" {
-		if v, err := strconv.Atoi(s); err == nil && v > 0 {
-			intervalSecs = v
-		}
-	}
 	logf("[%s] Received wait_for_change request: from=%q, interval=%d\n", remoteAddr, fromState, intervalSecs)
 	powerState, transient := sharedState.acquirePowerStateForRequest()
 	defer sharedState.releasePowerStateForRequest(transient)
