@@ -1,0 +1,25 @@
+
+set terminal png truecolor enhanced font "helvetica" size 640,440
+set style fill  transparent solid 0.50 noborder
+
+set tmargin 1
+set title "Hot water recirculation temperature" offset 0,-1
+#set timestamp "Last updated: %m/%d/%Y, %H:%M" top
+
+set xlabel "Hours ago" offset 0,0.75
+#set timefmt "%Y/%m/%d %H:%M"
+#set xdata time
+#set format x "%H:%M"u
+
+#set ylabel "GB"
+set yrange [ 0 : 1000 ]
+
+set format x "%.1f"
+
+set xrange [  : 0.04 ]
+set key left
+set grid
+set datafile separator "\t"
+#show variables
+
+plot $DATA using ($1)/3600:2 with filledcurves y1=0 fs transparent solid 0.50 lc rgb "gold" title "Pump Temperature", $DATA using ($1)/3600:3 with filledcurves y1=0 fs transparent solid 0.50 lc rgb "red" title "Pipe Temperature"
