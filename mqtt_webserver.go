@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -37,6 +39,7 @@ type serverState struct {
 	activeStreamRefs int
 	transientRefs    int
 	transientTimer   *time.Timer
+	streamTimer      *time.Timer
 	clientActivities map[string]*clientActivity // IP -> client activity
 }
 
@@ -84,6 +87,10 @@ func (s *serverState) acquirePowerStateForStream() PowerState {
 		s.transientTimer.Stop()
 		s.transientTimer = nil
 	}
+	if s.streamTimer != nil {
+		s.streamTimer.Stop()
+		s.streamTimer = nil
+	}
 	if s.powerState == nil {
 		s.powerState = NewPowerStateMQTT()
 		logln("Created PowerStateMQTT for first active event stream")
@@ -94,23 +101,31 @@ func (s *serverState) acquirePowerStateForStream() PowerState {
 }
 
 func (s *serverState) releasePowerStateForStream() {
-	var stateToClose PowerState
 	s.mu.Lock()
 	if s.activeStreamRefs == 0 {
 		s.mu.Unlock()
 		return
 	}
 	s.activeStreamRefs--
-	if s.activeStreamRefs == 0 && s.transientRefs == 0 {
-		stateToClose = s.powerState
-		s.powerState = nil
-		logln("No active event streams remain; closing PowerStateMQTT")
+	if s.activeStreamRefs == 0 && s.transientRefs == 0 && s.powerState != nil {
+		logln("No active event streams remain; starting 30s grace period")
+		s.streamTimer = time.AfterFunc(30*time.Second, func() {
+			s.mu.Lock()
+			if s.activeStreamRefs > 0 || s.transientRefs > 0 {
+				s.mu.Unlock()
+				return
+			}
+			ps := s.powerState
+			s.powerState = nil
+			s.streamTimer = nil
+			s.mu.Unlock()
+			if ps != nil {
+				ps.Close()
+				logln("Closed idle PowerStateMQTT after 30s stream grace period")
+			}
+		})
 	}
 	s.mu.Unlock()
-
-	if stateToClose != nil {
-		stateToClose.Close()
-	}
 }
 
 func (s *serverState) currentPowerState() PowerState {
@@ -131,6 +146,10 @@ func (s *serverState) acquirePowerStateForRequest() (PowerState, bool) {
 	if s.transientTimer != nil {
 		s.transientTimer.Stop()
 		s.transientTimer = nil
+	}
+	if s.streamTimer != nil {
+		s.streamTimer.Stop()
+		s.streamTimer = nil
 	}
 	s.transientRefs++
 	if s.powerState == nil {
@@ -440,7 +459,6 @@ func handlePower(w http.ResponseWriter, r *http.Request) {
 	}
 
 	powerState.RequestStateChange(value)
-	time.Sleep(100 * time.Millisecond)
 	writeJSON(w, map[string]string{"state": value}, http.StatusOK)
 }
 
@@ -597,8 +615,40 @@ func main() {
 	})
 
 	addr := fmt.Sprintf("%s:%d", *host, *port)
-	logf("Serving on %s\n", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		logln("Server stopped:", err)
+	srv := &http.Server{Addr: addr}
+
+	go func() {
+		logf("Serving on %s\n", addr)
+		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
+			logln("Server stopped:", err)
+		}
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	sig := <-sigCh
+	logf("Received signal %v, shutting down...\n", sig)
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logln("HTTP shutdown error:", err)
 	}
+
+	sharedState.mu.Lock()
+	ps := sharedState.powerState
+	sharedState.powerState = nil
+	if sharedState.transientTimer != nil {
+		sharedState.transientTimer.Stop()
+	}
+	if sharedState.streamTimer != nil {
+		sharedState.streamTimer.Stop()
+	}
+	sharedState.mu.Unlock()
+	if ps != nil {
+		ps.Close()
+		logln("Closed PowerStateMQTT during shutdown")
+	}
+
+	logln("Shutdown complete")
 }
