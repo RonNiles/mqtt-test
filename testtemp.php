@@ -90,6 +90,18 @@
       background: #9ba2b5;
     }
 
+    .pump-switch[data-state="on"]:focus-within .toggle {
+      outline: 0.25rem solid #4bd964;
+    }
+
+    .pump-switch[data-state="off"]:focus-within .toggle {
+      outline: 0.25rem solid #ff9500;
+    }
+
+    .pump-switch[data-state="disconnected"]:focus-within .toggle {
+      outline: 0.25rem solid #9ba2b5;
+    }
+
     .pump-status {
       width: 100%;
       font-family: Arial, sans-serif;
