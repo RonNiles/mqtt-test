@@ -231,9 +231,43 @@ func serveMakeGraph(w http.ResponseWriter, r *http.Request) {
 	cmdCtx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, "bash", "-c", `OUT=$(./getpts.sh); printf "\$DATA << EOD\n$OUT\nEOD" | cat - tempscript2 | gnuplot`)
-	cmd.Dir = "."
-	content, cmdErr := cmd.Output()
+	// First operation: execute getpts.sh to get data
+	cmd1 := exec.CommandContext(cmdCtx, "./getpts.sh")
+	cmd1.Dir = "."
+	ptsOutput, cmdErr := cmd1.Output()
+	if cmdErr != nil {
+		stderr := ""
+		if ee, ok := cmdErr.(*exec.ExitError); ok {
+			stderr = strings.TrimSpace(string(ee.Stderr))
+		}
+		if stderr != "" {
+			http.Error(w, fmt.Sprintf("getpts.sh failed: %v\n%s", cmdErr, stderr), http.StatusInternalServerError)
+		} else {
+			http.Error(w, fmt.Sprintf("getpts.sh failed: %v", cmdErr), http.StatusInternalServerError)
+		}
+		return
+	}
+	ptsOutput, err = appendFinalPTSRow(ptsOutput)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("invalid getpts.sh output: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Second operation: read tempscript and pipe data to gnuplot
+	tempscriptPath := filepath.Join(".", "tempscript")
+	tempscriptContent, readErr := os.ReadFile(tempscriptPath)
+	if readErr != nil {
+		http.Error(w, fmt.Sprintf("Could not read tempscript: %v", readErr), http.StatusInternalServerError)
+		return
+	}
+
+	// Prepare gnuplot input with data and script
+	gnuplotInput := fmt.Sprintf("$DATA << EOD\n%s\nEOD\n%s", ptsOutput, tempscriptContent)
+
+	cmd2 := exec.CommandContext(cmdCtx, "gnuplot")
+	cmd2.Dir = "."
+	cmd2.Stdin = strings.NewReader(gnuplotInput)
+	content, cmdErr := cmd2.Output()
 	if cmdErr != nil {
 		stderr := ""
 		if ee, ok := cmdErr.(*exec.ExitError); ok {
@@ -455,6 +489,30 @@ func writeJSON(w http.ResponseWriter, data map[string]string, status int) {
 
 func ioWriteString(w http.ResponseWriter, s string) (int, error) {
 	return w.Write([]byte(s))
+}
+
+func appendFinalPTSRow(data []byte) ([]byte, error) {
+	trimmed := bytes.TrimRight(data, "\r\n")
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("empty output")
+	}
+
+	lines := bytes.Split(trimmed, []byte("\n"))
+	lastLine := lines[len(lines)-1]
+	fields := bytes.SplitN(lastLine, []byte("\t"), 3)
+	if len(fields) != 3 {
+		return nil, fmt.Errorf("expected 3 tab-separated columns in final row")
+	}
+
+	paddedLine := append([]byte("120\t"), fields[1]...)
+	paddedLine = append(paddedLine, '\t')
+	paddedLine = append(paddedLine, fields[2]...)
+
+	result := append([]byte(nil), trimmed...)
+	result = append(result, '\n')
+	result = append(result, paddedLine...)
+	result = append(result, '\n')
+	return result, nil
 }
 
 func appendEmphasizedFinalPoint(ctx context.Context, path string) error {
