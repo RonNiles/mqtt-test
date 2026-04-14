@@ -1,5 +1,5 @@
 
-set terminal png truecolor enhanced font "helvetica" size 640,440
+set terminal png truecolor enhanced giant size 640,440
 set style fill  transparent solid 0.50 noborder
 
 set tmargin 1
@@ -21,5 +21,7 @@ set key left
 set grid
 set datafile separator "\t"
 #show variables
+
+set label 1 system("date '+%B %d, %Y %I:%M:%S %p'") at graph 0.5, 0.03 front left textcolor rgb "black"
 
 plot $DATA using ($1)/3600:2 with filledcurves y1=0 fs transparent solid 0.50 lc rgb "gold" title "Pump Temperature", $DATA using ($1)/3600:3 with filledcurves y1=0 fs transparent solid 0.50 lc rgb "red" title "Pipe Temperature"
