@@ -29,6 +29,7 @@ const (
 type clientActivity struct {
 	lastMakeGraphCall    time.Time
 	waitForChangeSeconds int
+	lastGraphVersion     int
 }
 
 type serverState struct {
@@ -70,13 +71,6 @@ func (s *serverState) shouldHangupWaitForChange(ip string, seconds int) bool {
 	activity.waitForChangeSeconds += seconds
 	logf("Checking if client %s should be hung up: %d seconds\n", ip, activity.waitForChangeSeconds)
 	return activity.waitForChangeSeconds > 180
-}
-
-func (s *serverState) hasMakeGraphCallWithin(ip string, d time.Duration) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	activity := s.lockedGetClientActivity(ip)
-	return !activity.lastMakeGraphCall.IsZero() && time.Since(activity.lastMakeGraphCall) <= d
 }
 
 func (s *serverState) acquirePowerStateForStream() PowerState {
@@ -230,6 +224,144 @@ func serveTemperature(w http.ResponseWriter) {
 	_, _ = w.Write(content)
 }
 
+type graphState struct {
+	mu          sync.Mutex
+	version     int
+	pngData     []byte
+	lastErr     error
+	waiters     []chan struct{}
+	running     bool
+	lastRequest time.Time
+}
+
+var sharedGraphState = &graphState{}
+
+func generateGraphOnce(ctx context.Context) ([]byte, int, error) {
+	cmdCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	cmd1 := exec.CommandContext(cmdCtx, "./getpts.sh")
+	cmd1.Dir = "."
+	ptsOutput, err := cmd1.Output()
+	if err != nil {
+		stderr := ""
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = strings.TrimSpace(string(ee.Stderr))
+		}
+		if stderr != "" {
+			return nil, 0, fmt.Errorf("getpts.sh failed: %v: %s", err, stderr)
+		}
+		return nil, 0, fmt.Errorf("getpts.sh failed: %v", err)
+	}
+
+	lastAge, err := mostRecentRowAge(ptsOutput)
+	if err != nil {
+		return nil, 0, fmt.Errorf("parsing getpts.sh output: %v", err)
+	}
+
+	ptsOutput, err = appendFinalPTSRow(ptsOutput)
+	if err != nil {
+		return nil, 0, fmt.Errorf("invalid getpts.sh output: %v", err)
+	}
+
+	tempscriptContent, err := os.ReadFile(filepath.Join(".", "tempscript"))
+	if err != nil {
+		return nil, 0, fmt.Errorf("could not read tempscript: %v", err)
+	}
+
+	gnuplotInput := fmt.Sprintf("$DATA << EOD\n%s\nEOD\n%s", ptsOutput, tempscriptContent)
+	cmd2 := exec.CommandContext(cmdCtx, "gnuplot")
+	cmd2.Dir = "."
+	cmd2.Stdin = strings.NewReader(gnuplotInput)
+	content, err := cmd2.Output()
+	if err != nil {
+		stderr := ""
+		if ee, ok := err.(*exec.ExitError); ok {
+			stderr = strings.TrimSpace(string(ee.Stderr))
+		}
+		if stderr != "" {
+			return nil, 0, fmt.Errorf("graph generation failed: %v: %s", err, stderr)
+		}
+		return nil, 0, fmt.Errorf("graph generation failed: %v", err)
+	}
+	if len(content) == 0 {
+		return nil, 0, fmt.Errorf("graph generation produced no output")
+	}
+	return content, lastAge, nil
+}
+
+// mostRecentRowAge parses the first column (negative seconds-from-now) of the
+// last data row in getpts.sh output. Returns 0 if it can't parse.
+func mostRecentRowAge(data []byte) (int, error) {
+	trimmed := bytes.TrimRight(data, "\r\n")
+	if len(trimmed) == 0 {
+		return 0, fmt.Errorf("empty output")
+	}
+	lines := bytes.Split(trimmed, []byte("\n"))
+	lastLine := lines[len(lines)-1]
+	fields := bytes.SplitN(lastLine, []byte("\t"), 2)
+	if len(fields) < 1 {
+		return 0, fmt.Errorf("no fields in final row")
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(string(fields[0])))
+	if err != nil {
+		return 0, fmt.Errorf("first column not an int: %v", err)
+	}
+	return v, nil
+}
+
+func generatorLoop() {
+	for {
+		start := time.Now()
+		pngData, lastAge, err := generateGraphOnce(context.Background())
+		elapsed := time.Since(start)
+
+		sharedGraphState.mu.Lock()
+		if err == nil {
+			sharedGraphState.version++
+			sharedGraphState.pngData = pngData
+			sharedGraphState.lastErr = nil
+			logf("generator: produced version %d (lastAge=%ds, took %v, %d bytes)\n",
+				sharedGraphState.version, lastAge, elapsed.Round(time.Millisecond), len(pngData))
+		} else {
+			sharedGraphState.lastErr = err
+			logf("generator: generation failed: %v\n", err)
+		}
+		waiters := sharedGraphState.waiters
+		sharedGraphState.waiters = nil
+
+		idle := time.Since(sharedGraphState.lastRequest) > 60*time.Second
+		if idle {
+			sharedGraphState.running = false
+			sharedGraphState.mu.Unlock()
+			for _, ch := range waiters {
+				close(ch)
+			}
+			logln("generator: idle for >60s, exiting")
+			return
+		}
+		sharedGraphState.mu.Unlock()
+
+		for _, ch := range waiters {
+			close(ch)
+		}
+
+		var sleep time.Duration
+		if err != nil {
+			sleep = 5 * time.Second
+		} else {
+			sleep = time.Duration(11+lastAge) * time.Second
+			if sleep < 2*time.Second {
+				sleep = 2 * time.Second
+			}
+			if sleep > 11*time.Second {
+				sleep = 11 * time.Second
+			}
+		}
+		time.Sleep(sleep)
+	}
+}
+
 func serveMakeGraph(w http.ResponseWriter, r *http.Request) {
 	remoteAddr := r.RemoteAddr
 	logf("[%s] Received request for %s\n", remoteAddr, r.URL.Path)
@@ -237,78 +369,75 @@ func serveMakeGraph(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		ip = remoteAddr
 	}
-	// don't synchronize graph generation if the same client hasn't made a makegraph.php call within the last 3 minutes
-	// they should get instant response in this case
-	synchronize := sharedState.hasMakeGraphCallWithin(ip, 3*time.Minute)
+
+	// reset waitForChangeSeconds (preserve original side effect)
 	sharedState.recordMakeGraphCall(ip)
-	now := time.Now()
-	waitDuration := time.Until(now.Truncate(10 * time.Second).Add(10 * time.Second))
-	if synchronize {
-		time.Sleep(waitDuration)
-		logf("[%s] Waited %v to synchronize graph generation\n", remoteAddr, waitDuration)
-	}
-	cmdCtx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-	defer cancel()
 
-	// First operation: execute getpts.sh to get data
-	cmd1 := exec.CommandContext(cmdCtx, "./getpts.sh")
-	cmd1.Dir = "."
-	ptsOutput, cmdErr := cmd1.Output()
-	if cmdErr != nil {
-		stderr := ""
-		if ee, ok := cmdErr.(*exec.ExitError); ok {
-			stderr = strings.TrimSpace(string(ee.Stderr))
+	sharedState.mu.Lock()
+	activity := sharedState.lockedGetClientActivity(ip)
+	knownVersion := activity.lastGraphVersion
+	sharedState.mu.Unlock()
+
+	sharedGraphState.mu.Lock()
+	sharedGraphState.lastRequest = time.Now()
+	currentVersion := sharedGraphState.version
+	currentData := sharedGraphState.pngData
+	haveData := currentData != nil
+	serveImmediately := haveData && knownVersion != 0 && knownVersion != currentVersion
+
+	if serveImmediately {
+		sharedGraphState.mu.Unlock()
+		sharedState.mu.Lock()
+		activity.lastGraphVersion = currentVersion
+		sharedState.mu.Unlock()
+		writePNG(w, remoteAddr, currentVersion, currentData)
+		return
+	}
+
+	waiter := make(chan struct{})
+	sharedGraphState.waiters = append(sharedGraphState.waiters, waiter)
+	if !sharedGraphState.running {
+		sharedGraphState.running = true
+		go generatorLoop()
+		logf("[%s] Started generator goroutine\n", remoteAddr)
+	}
+	sharedGraphState.mu.Unlock()
+
+	select {
+	case <-waiter:
+	case <-r.Context().Done():
+		logf("[%s] Client disconnected while waiting for graph\n", remoteAddr)
+		return
+	}
+
+	sharedGraphState.mu.Lock()
+	data := sharedGraphState.pngData
+	newVersion := sharedGraphState.version
+	lastErr := sharedGraphState.lastErr
+	sharedGraphState.mu.Unlock()
+
+	if data == nil {
+		msg := "graph generation failed"
+		if lastErr != nil {
+			msg = fmt.Sprintf("graph generation failed: %v", lastErr)
 		}
-		if stderr != "" {
-			http.Error(w, fmt.Sprintf("getpts.sh failed: %v\n%s", cmdErr, stderr), http.StatusInternalServerError)
-		} else {
-			http.Error(w, fmt.Sprintf("getpts.sh failed: %v", cmdErr), http.StatusInternalServerError)
-		}
-		return
-	}
-	ptsOutput, err = appendFinalPTSRow(ptsOutput)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("invalid getpts.sh output: %v", err), http.StatusInternalServerError)
+		http.Error(w, msg, http.StatusInternalServerError)
 		return
 	}
 
-	// Second operation: read tempscript and pipe data to gnuplot
-	tempscriptPath := filepath.Join(".", "tempscript")
-	tempscriptContent, readErr := os.ReadFile(tempscriptPath)
-	if readErr != nil {
-		http.Error(w, fmt.Sprintf("Could not read tempscript: %v", readErr), http.StatusInternalServerError)
-		return
-	}
+	sharedState.mu.Lock()
+	activity.lastGraphVersion = newVersion
+	sharedState.mu.Unlock()
 
-	// Prepare gnuplot input with data and script
-	gnuplotInput := fmt.Sprintf("$DATA << EOD\n%s\nEOD\n%s", ptsOutput, tempscriptContent)
+	writePNG(w, remoteAddr, newVersion, data)
+}
 
-	cmd2 := exec.CommandContext(cmdCtx, "gnuplot")
-	cmd2.Dir = "."
-	cmd2.Stdin = strings.NewReader(gnuplotInput)
-	content, cmdErr := cmd2.Output()
-	if cmdErr != nil {
-		stderr := ""
-		if ee, ok := cmdErr.(*exec.ExitError); ok {
-			stderr = strings.TrimSpace(string(ee.Stderr))
-		}
-		if stderr != "" {
-			http.Error(w, fmt.Sprintf("graph generation failed: %v\n%s", cmdErr, stderr), http.StatusInternalServerError)
-		} else {
-			http.Error(w, fmt.Sprintf("graph generation failed: %v", cmdErr), http.StatusInternalServerError)
-		}
-		return
-	}
-	if len(content) == 0 {
-		http.Error(w, "graph generation produced no output", http.StatusInternalServerError)
-		return
-	}
-	logf("[%s] Image file of length %d generated successfully\n", remoteAddr, len(content))
-
+func writePNG(w http.ResponseWriter, remoteAddr string, version int, data []byte) {
 	w.Header().Set("Content-Type", "image/png")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(content)))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(data)))
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(content)
+	_, _ = w.Write(data)
+	logf("[%s] Served graph version %d (%d bytes)\n", remoteAddr, version, len(data))
 }
 
 func streamEvents(w http.ResponseWriter, r *http.Request) {
@@ -531,24 +660,6 @@ func appendFinalPTSRow(data []byte) ([]byte, error) {
 	result = append(result, paddedLine...)
 	result = append(result, '\n')
 	return result, nil
-}
-
-func appendEmphasizedFinalPoint(ctx context.Context, path string) error {
-	cmd := exec.CommandContext(ctx, "sh", "-c", `PAD=$(tail -n 1 "$ptsfile" | awk -v OFS="\t" '{ print 120, $2, $3 }'); printf '%s\n' "$PAD" >> "$ptsfile"`)
-	cmd.Env = append(os.Environ(), "ptsfile="+path)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("append final point failed: %v: %s", err, strings.TrimSpace(string(output)))
-	}
-	return nil
-}
-
-func fileSize(path string) int64 {
-	info, err := os.Stat(path)
-	if err != nil {
-		return -1
-	}
-	return info.Size()
 }
 
 func main() {
